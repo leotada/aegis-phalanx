@@ -7,6 +7,14 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Type
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
+def sanitize_environment() -> None:
+    """Removes GITHUB_TOKEN if it is still set to the default placeholder."""
+    if os.environ.get("GITHUB_TOKEN") == "your_github_token_here":
+        os.environ.pop("GITHUB_TOKEN", None)
+
+sanitize_environment()
+
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 ALLOWED_CHAT_ID = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
@@ -46,6 +54,7 @@ class AntigravityAgentCLI(AgentCLI):
             "agy",
             "--model", full_model_name,
             "--dangerously-skip-permissions",
+            "--print-timeout", "15m",
             "--print", prompt
         ]
 
@@ -131,7 +140,7 @@ PIPELINE_CONFIG = [
         "tool": "agy",
         "model": "gemini-3.5-flash",
         "reasoning_budget": "low",
-        "prompt": "Commit all changes using the Conventional Commits pattern. Push the current branch to origin. Use the 'gh' (GitHub CLI) tool to open a Pull Request detailing what was implemented and the test coverage."
+        "prompt": "Commit all changes using the Conventional Commits pattern. Check if a git remote named 'origin' exists. If it exists, push the current branch to origin and use the 'gh' (GitHub CLI) tool to open a Pull Request detailing what was implemented and the test coverage. If 'origin' does not exist or pushing fails, skip the push and PR, but confirm that all changes are successfully committed locally."
     }
 ]
 
