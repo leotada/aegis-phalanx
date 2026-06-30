@@ -41,6 +41,28 @@ def normalize_repo_url(repo: str) -> str:
         repo = repo[:-4]
     return f"https://github.com/{repo}.git"
 
+
+def extract_owner_repo(repo_url: str) -> str | None:
+    """
+    Extracts the 'owner/repo' slug from any supported GitHub URL format.
+    Returns None if the URL cannot be parsed.
+    Supported formats:
+      - git@github.com:owner/repo.git
+      - https://github.com/owner/repo.git
+      - https://x-access-token:<token>@github.com/owner/repo.git
+    """
+    # SSH format: git@github.com:owner/repo or git@github.com:owner/repo.git
+    ssh_match = re.match(r'^(?:ssh://)?git@github\.com[:/]([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+?)(?:\.git)?$', repo_url.strip(), re.IGNORECASE)
+    if ssh_match:
+        return ssh_match.group(1)
+
+    # HTTPS format (with optional token auth): https://[token@]github.com/owner/repo[.git]
+    https_match = re.match(r'^https?://(?:[^@/]+@)?github\.com/([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+?)(?:\.git)?$', repo_url.strip(), re.IGNORECASE)
+    if https_match:
+        return https_match.group(1)
+
+    return None
+
 def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -> tuple[str, str]:
     """
     Parses the user's demand to extract the repository URL and the clean demand description.
@@ -209,7 +231,7 @@ class AgentCLI(ABC):
     Common abstraction for all AI Agent CLIs (Single Responsibility Principle).
     """
     @abstractmethod
-    def build_command(self, prompt: str, model: str, reasoning_budget: str) -> List[str]:
+    def build_command(self, prompt: str, model: str, reasoning_budget: str, timeout: str = None) -> List[str]:
         """Generates the terminal argument list to run the tool."""
         pass
 
@@ -220,7 +242,7 @@ class AgentCLI(ABC):
 
 class AntigravityAgentCLI(AgentCLI):
     """Adapter for the official Antigravity CLI (Google)."""
-    def build_command(self, prompt: str, model: str, reasoning_budget: str) -> List[str]:
+    def build_command(self, prompt: str, model: str, reasoning_budget: str, timeout: str = None) -> List[str]:
         # Map slugs to the exact names displayed in `agy models`
         model_map = {
             "gemini-3.1-pro": "Gemini 3.1 Pro",
@@ -230,19 +252,20 @@ class AntigravityAgentCLI(AgentCLI):
         base_name = model_map.get(model.lower(), model)
         budget = reasoning_budget.capitalize() if reasoning_budget else "Medium"
         full_model_name = f"{base_name} ({budget})"
+        effective_timeout = timeout if timeout else AGENT_STEP_TIMEOUT
         
         return [
             "agy",
             "--model", full_model_name,
             "--dangerously-skip-permissions",
-            "--print-timeout", AGENT_STEP_TIMEOUT,
+            "--print-timeout", effective_timeout,
             "--print", prompt
         ]
 
 
 class ClaudeCodeAgentCLI(AgentCLI):
     """Adapter for the official Claude Code CLI (Anthropic)."""
-    def build_command(self, prompt: str, model: str, reasoning_budget: str) -> List[str]:
+    def build_command(self, prompt: str, model: str, reasoning_budget: str, timeout: str = None) -> List[str]:
         return [
             "claude",
             "-p", prompt,
@@ -252,7 +275,7 @@ class ClaudeCodeAgentCLI(AgentCLI):
 
 class AiderAgentCLI(AgentCLI):
     """Optional adapter for Aider (in case you want to use it in the future)."""
-    def build_command(self, prompt: str, model: str, reasoning_budget: str) -> List[str]:
+    def build_command(self, prompt: str, model: str, reasoning_budget: str, timeout: str = None) -> List[str]:
         return [
             "aider",
             "--model", model,
@@ -314,6 +337,7 @@ PIPELINE_CONFIG = [
         "tool": "agy",
         "model": "gemini-3.5-flash",
         "reasoning_budget": "high",
+        "timeout": "10m",
         "prompt": "Act as a Staff Engineer reviewer. Analyze the recent changes. Was the TDD principle respected? Is the code clean, secure, and free of code smells? If not, refactor the code while ensuring the test suite continues to pass."
     },
     {
@@ -321,7 +345,7 @@ PIPELINE_CONFIG = [
         "tool": "agy",
         "model": "gemini-3.5-flash",
         "reasoning_budget": "low",
-        "prompt": "Commit all changes using the Conventional Commits pattern. Check if a git remote named 'origin' exists. If it exists, push the current branch to origin and use the 'gh' (GitHub CLI) tool to open a Pull Request detailing what was implemented and the test coverage. If 'origin' does not exist or pushing fails, skip the push and PR, but confirm that all changes are successfully committed locally."
+        "prompt": "Commit all changes using the Conventional Commits pattern. Push the current branch to origin using `git push origin HEAD`. Then use the GitHub CLI to open a Pull Request: run `gh pr create --fill --repo {repo_owner_name}`. If the push fails, retry once. If PR creation fails, output the exact error and do NOT skip it silently — report the failure. Do not mark this task complete without a confirmed PR URL."
     }
 ]
 
@@ -545,14 +569,18 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             parse_mode="HTML"
         )
         
-        prompt_content = step['prompt'].format(demand=demand)
+        prompt_content = step['prompt'].format(
+            demand=demand,
+            repo_owner_name=extract_owner_repo(repo_url) or repo_url
+        )
         
         try:
             agent_cli = AgentRegistry.get_agent(step['tool'])
             command = agent_cli.build_command(
                 prompt=prompt_content,
                 model=step['model'],
-                reasoning_budget=step['reasoning_budget']
+                reasoning_budget=step['reasoning_budget'],
+                timeout=step.get('timeout')
             )
             
             returncode, stdout_str, stderr_str = await run_command_and_stream(command, cwd=project_dir)
@@ -619,7 +647,11 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             disable_web_page_preview=True
         )
     else:
-        await update.message.reply_text("✅ Multi-Model Pipeline completed successfully! PR opened on repository.")
+        await update.message.reply_text(
+            "✅ <b>Multi-Model Pipeline completed!</b>\n\n"
+            "⚠️ Could not confirm PR URL — check the repository manually or use <code>/status</code> to review completed steps.",
+            parse_mode="HTML"
+        )
     clear_session()
 
 async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):

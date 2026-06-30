@@ -9,11 +9,12 @@ from telegram_listener import (
     load_session,
     clear_session,
     delete_session,
-    classify_intent
+    classify_intent,
+    extract_owner_repo,
 )
 
 def test_antigravity_cli_timeout_argument(monkeypatch):
-    # Verify default step timeout is '5m'
+    # Verify default step timeout is used when no per-step timeout is given
     cli = AntigravityAgentCLI()
     cmd = cli.build_command("Test prompt", "gemini-3.5-flash", "low")
     assert "--print-timeout" in cmd
@@ -33,6 +34,40 @@ def test_antigravity_cli_timeout_argument(monkeypatch):
     finally:
         monkeypatch.delenv("AGENT_STEP_TIMEOUT", raising=False)
         importlib.reload(telegram_listener)
+
+
+def test_antigravity_cli_per_step_timeout_override():
+    """A per-step timeout passed to build_command should override the global default."""
+    cli = AntigravityAgentCLI()
+    cmd = cli.build_command("Test prompt", "gemini-3.5-flash", "low", timeout="20m")
+    assert "--print-timeout" in cmd
+    idx = cmd.index("--print-timeout")
+    assert cmd[idx + 1] == "20m"
+
+
+def test_extract_owner_repo_ssh():
+    assert extract_owner_repo("git@github.com:leotada/visto.git") == "leotada/visto"
+
+
+def test_extract_owner_repo_ssh_no_dot_git():
+    assert extract_owner_repo("git@github.com:leotada/visto") == "leotada/visto"
+
+
+def test_extract_owner_repo_https():
+    assert extract_owner_repo("https://github.com/leotada/visto.git") == "leotada/visto"
+
+
+def test_extract_owner_repo_https_no_dot_git():
+    assert extract_owner_repo("https://github.com/leotada/visto") == "leotada/visto"
+
+
+def test_extract_owner_repo_authenticated_https():
+    # Authenticated URLs (with token) should still parse cleanly
+    assert extract_owner_repo("https://x-access-token:gho_abc@github.com/leotada/visto.git") == "leotada/visto"
+
+
+def test_extract_owner_repo_invalid_returns_none():
+    assert extract_owner_repo("not-a-github-url") is None
 
 
 
@@ -282,7 +317,43 @@ async def test_run_pipeline_ssh_no_token(monkeypatch):
         )
 
 
+@pytest.mark.anyio
+async def test_pipeline_reports_honestly_when_no_pr_url(monkeypatch):
+    """When no PR URL is found after the pipeline, the message must NOT claim 'PR opened'."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
 
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
 
+    mock_context = MagicMock()
+
+    # Simulate: clone succeeds, git config succeeds, checkout succeeds,
+    # then each pipeline step exits 0 (success) but produces no output
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"", b"")
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch.object(telegram_listener, "get_pr_url", return_value=""), \
+         patch.object(telegram_listener, "get_git_changes", return_value=""), \
+         patch.object(telegram_listener, "get_pytest_summary", return_value=""), \
+         patch.object(telegram_listener, "run_command_and_stream", return_value=(0, "", "")):
+
+        await telegram_listener.run_pipeline(
+            mock_update, mock_context,
+            "git@github.com:owner/repo.git", "test demand"
+        )
+
+    # Gather all reply_text calls
+    calls = [str(call) for call in mock_update.message.reply_text.call_args_list]
+    final_call = calls[-1] if calls else ""
+
+    # Must NOT contain the old lying message
+    assert "PR opened on repository" not in final_call
+    # Must contain an honest indicator
+    assert "Could not confirm PR" in final_call or "manually" in final_call
 
