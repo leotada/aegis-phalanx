@@ -1,0 +1,46 @@
+version: '3.8'
+
+networks:
+  agent_network:
+    driver: bridge
+
+services:
+  # Database Container
+  db:
+    image: postgres:16-alpine
+    container_name: agent_postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: appdb
+    networks:
+      - agent_network
+    # No exposed ports to the host, ensuring total isolation
+
+  # Agent Container
+  agent:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: agent_workspace
+    environment:
+      # Infrastructure
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID} # Security: Dedicated bot for your user only
+      - DATABASE_URL=postgresql://admin:admin@db:5432/appdb
+      - SSH_AUTH_SOCK=${SSH_AUTH_SOCK}
+    volumes:
+      - ./:/workspace:Z
+      # Mounting directories for local login/credentials session files of the official CLIs
+      - ~/.config/claude:/root/.config/claude:Z
+      - ~/.config/antigravity:/root/.config/antigravity:Z
+      # Mounting user's local SSH Agent socket for Git/GitHub SSH authentication
+      - ${SSH_AUTH_SOCK}:${SSH_AUTH_SOCK}:z
+      # Mounting host ~/.ssh directory for keys and known_hosts
+      - ~/.ssh:/root/.ssh:ro,z
+    networks:
+      - agent_network
+    working_dir: /workspace
+    # Start the multi-model orchestrator
+    command: python3 /workspace/telegram_listener.py
