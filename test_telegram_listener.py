@@ -177,4 +177,81 @@ def test_build_application():
         del os.environ["TELEGRAM_BOT_TOKEN"]
 
 
+def test_parse_demand_various_formats():
+    # SSH formats
+    repo, clean = parse_demand("git@github.com:owner/repo.git: test demand", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "test demand"
+
+    repo, clean = parse_demand("git@github.com:owner/repo: test demand", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "test demand"
+
+    repo, clean = parse_demand("git@github.com:owner/repo.git test demand", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "test demand"
+
+    repo, clean = parse_demand("git@github.com:owner/repo test demand", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "test demand"
+
+    repo, clean = parse_demand("git@github.com:owner/repo.git", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == ""
+
+    # SSH URI format
+    repo, clean = parse_demand("ssh://git@github.com/owner/repo.git: test demand", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "test demand"
+
+    # HTTPS formats
+    repo, clean = parse_demand("https://github.com/owner/repo.git: test demand", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "test demand"
+
+    repo, clean = parse_demand("https://github.com/owner/repo: test demand", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "test demand"
+
+    repo, clean = parse_demand("https://github.com/owner/repo.git test demand", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "test demand"
+
+    repo, clean = parse_demand("https://github.com/owner/repo test demand", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "test demand"
+
+    repo, clean = parse_demand("https://github.com/owner/repo.git", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == ""
+
+    # Shorthand formats
+    repo, clean = parse_demand("owner/repo: test demand", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "test demand"
+
+    repo, clean = parse_demand("owner/repo", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == ""
+
+    # URLs anywhere in the message (middle, end, with prepositions/connectors)
+    repo, clean = parse_demand("implement user login in https://github.com/owner/repo.git", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "implement user login"
+
+    repo, clean = parse_demand("caching for git@github.com:owner/repo", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "caching"
+
+    repo, clean = parse_demand("create a new endpoint on https://github.com/owner/repo.git for users", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "create a new endpoint for users"
+
+    repo, clean = parse_demand("https://github.com/owner/repo.git : do something", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "do something"
+
+
+
+
 

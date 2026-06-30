@@ -16,34 +16,80 @@ def sanitize_environment() -> None:
 
 sanitize_environment()
 
+def normalize_repo_url(repo: str) -> str:
+    """Normalizes any repo format (HTTPS, SSH, shorthand) to the standard HTTPS format."""
+    repo = repo.strip()
+    # Remove .git suffix if present
+    if repo.lower().endswith(".git"):
+        repo = repo[:-4]
+        
+    # Check if it starts with HTTP/HTTPS URL
+    if repo.lower().startswith(("http://", "https://")):
+        return f"{repo}.git"
+        
+    # Check if it starts with SSH URL format
+    # E.g. git@github.com:owner/repo or ssh://git@github.com/owner/repo
+    ssh_prefix_match = re.match(r'^(?:ssh://)?git@github\.com[:/](.*)$', repo, re.IGNORECASE)
+    if ssh_prefix_match:
+        repo_path = ssh_prefix_match.group(1)
+        return f"https://github.com/{repo_path}.git"
+        
+    # Shorthand (owner/repo)
+    return f"https://github.com/{repo}.git"
+
 def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -> tuple[str, str]:
     """
     Parses the user's demand to extract the repository URL and the clean demand description.
     """
-    # Pattern: optional URL prefix, then owner/repo, then ':'
-    match_repo = re.match(r'^(?:https://github\.com/)?([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+)(?:\.git)?\s*:\s*(.*)$', demand, re.IGNORECASE)
-    if match_repo:
-        repo_name = match_repo.group(1)
-        if repo_name.lower().endswith(".git"):
-            repo_name = repo_name[:-4]
-        clean_demand = match_repo.group(2).strip()
-        return f"https://github.com/{repo_name}.git", clean_demand
+    demand_stripped = demand.strip()
     
+    # 1. Search for full HTTP/HTTPS or SSH Github URLs anywhere in the string
+    url_pattern = r'(?:https?://github\.com/|(?:ssh://)?git@github\.com[:/])[a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+(?:\.git)?'
+    url_match = re.search(url_pattern, demand_stripped, re.IGNORECASE)
+    if url_match:
+        repo_url = url_match.group(0)
+        start_idx, end_idx = url_match.span()
+        
+        left_part = demand_stripped[:start_idx]
+        right_part = demand_stripped[end_idx:]
+        
+        # Clean colons/dashes right after or before the URL
+        right_part = re.sub(r'^\s*[:\-]\s*', '', right_part)
+        left_part = re.sub(r'\s*[:\-]\s*$', '', left_part)
+        
+        # Clean prepositions before the URL
+        left_part = re.sub(r'\b(in|for|on|to|at|into|from)\s*$', '', left_part, flags=re.IGNORECASE)
+        
+        clean_demand = (left_part.strip() + " " + right_part.strip()).strip()
+        return normalize_repo_url(repo_url), clean_demand
+
+    # 2. Match shorthand owner/repo followed by a colon at the start of the message
+    shorthand_colon_match = re.match(
+        r'^([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+?)(?:\.git)?\s*:\s*(.*)$',
+        demand_stripped,
+        re.IGNORECASE
+    )
+    if shorthand_colon_match:
+        repo_name = shorthand_colon_match.group(1)
+        clean_demand = shorthand_colon_match.group(2).strip()
+        return normalize_repo_url(repo_name), clean_demand
+
+    # 3. Match shorthand owner/repo by itself (entire string)
+    shorthand_exact_match = re.match(
+        r'^([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+?)(?:\.git)?$',
+        demand_stripped,
+        re.IGNORECASE
+    )
+    if shorthand_exact_match:
+        repo_name = shorthand_exact_match.group(1)
+        return normalize_repo_url(repo_name), ""
+
+    # Fallbacks
     if default_repo:
-        repo_url = default_repo
-        if repo_url.lower().endswith(".git"):
-            repo_url = repo_url[:-4]
-        if not repo_url.startswith("http"):
-            repo_url = f"https://github.com/{repo_url}.git"
-        return repo_url, demand
+        return normalize_repo_url(default_repo), demand
         
     if last_repo:
-        repo_url = last_repo
-        if repo_url.lower().endswith(".git"):
-            repo_url = repo_url[:-4]
-        if not repo_url.startswith("http"):
-            repo_url = f"https://github.com/{repo_url}.git"
-        return repo_url, demand
+        return normalize_repo_url(last_repo), demand
         
     return None, demand
 
