@@ -131,7 +131,32 @@ PIPELINE_CONFIG = [
         "reasoning_budget": "low",
         "prompt": "Commit all changes using the Conventional Commits pattern. Push the current branch to origin. Use the 'gh' (GitHub CLI) tool to open a Pull Request detailing what was implemented and the test coverage."
     }
-]
+async def run_command_and_stream(command: List[str]) -> tuple[int, str, str]:
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    
+    stdout_chunks = []
+    stderr_chunks = []
+    
+    async def read_stream(stream, chunks, prefix):
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            decoded = line.decode('utf-8', errors='replace')
+            chunks.append(decoded)
+            print(f"[{prefix}] {decoded.rstrip()}", flush=True)
+            
+    await asyncio.gather(
+        read_stream(process.stdout, stdout_chunks, "STDOUT"),
+        read_stream(process.stderr, stderr_chunks, "STDERR")
+    )
+    
+    returncode = await process.wait()
+    return returncode, "".join(stdout_chunks), "".join(stderr_chunks)
 
 async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
@@ -157,17 +182,9 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reasoning_budget=step['reasoning_budget']
             )
             
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
+            returncode, stdout_str, stderr_str = await run_command_and_stream(command)
             
-            stdout_str = stdout.decode('utf-8', errors='replace')
-            stderr_str = stderr.decode('utf-8', errors='replace')
-            
-            if process.returncode != 0:
+            if returncode != 0:
                 error_msg = f"⚠️ Failure in step {step['step_name']}:\n\n"
                 if stderr_str.strip():
                     error_msg += f"Stderr:\n{stderr_str[:800]}\n\n"
