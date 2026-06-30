@@ -15,8 +15,6 @@ This document outlines the operational guidelines and rules that all AI agents o
 
 ## 3. Git and Pull Request Standards
 * Use **Conventional Commits** for all commits (e.g., `feat: ...`, `fix: ...`, `test: ...`, `refactor: ...`).
-* Keep branches isolated under `feature/` namespaces.
-* Document the Pull Request implementation, architecture, and test execution details clearly in the PR body.
 
 ## 4. Code Quality & Security
 * Adhere to SOLID design principles.
