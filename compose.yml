@@ -35,6 +35,7 @@ services:
       - AGENT_STEP_TIMEOUT=${AGENT_STEP_TIMEOUT:-5m}
       - AGENT_INTENT_TIMEOUT=${AGENT_INTENT_TIMEOUT:-15s}
       - SSH_AUTH_SOCK=${SSH_AUTH_SOCK}
+      - DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}
     volumes:
       # Mounting directories for local login/credentials session files of the official CLIs
       - ~/.config/aegis-phalanx:/root/.config/aegis-phalanx:Z
@@ -46,6 +47,7 @@ services:
       - ~/.antigravity:/root/.antigravity:Z
       - ${SSH_AUTH_SOCK:-/dev/null}:${SSH_AUTH_SOCK:-/dev/null}
       - ~/.ssh:/root/.ssh:ro
+      - /run/user/1000/bus:/run/user/1000/bus
     networks:
       - agent_network
     working_dir: /workspace
