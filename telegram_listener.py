@@ -1,6 +1,8 @@
 import os
 import asyncio
 import html
+import re
+import subprocess
 from abc import ABC, abstractmethod
 from typing import Dict, List, Type
 from telegram import Update
@@ -158,6 +160,46 @@ async def run_command_and_stream(command: List[str]) -> tuple[int, str, str]:
     returncode = await process.wait()
     return returncode, "".join(stdout_chunks), "".join(stderr_chunks)
 
+def get_git_changes() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd="/workspace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            lines = result.stdout.strip().splitlines()
+            changes = []
+            for line in lines[:5]:
+                parts = line.strip().split(maxsplit=1)
+                if len(parts) == 2:
+                    status, path = parts
+                    changes.append(f"• `{path}` ({status})")
+            if len(lines) > 5:
+                changes.append(f"• ... and {len(lines) - 5} more files")
+            return "\n".join(changes)
+    except Exception:
+        pass
+    return ""
+
+def get_pytest_summary(output: str) -> str:
+    # Match standard pytest summary patterns
+    match = re.search(r'=+\s+([\d\s\w\-,]+)\s+in\s+[\d\.]+s\s+=+', output)
+    if match:
+        return match.group(1).strip()
+    match2 = re.search(r'([\d]+ passed, [\d]+ failed.*)', output)
+    if match2:
+        return match2.group(1).strip()
+    return ""
+
+def get_pr_url(output: str) -> str:
+    match = re.search(r'(https://github\.com/[^\s]+/pull/\d+)', output)
+    if match:
+        return match.group(1)
+    return ""
+
 async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if chat_id != ALLOWED_CHAT_ID:
@@ -193,13 +235,33 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(error_msg)
                 return
 
-            # On success, send a short summary of the output (max 10 lines)
-            stdout_lines = [line.strip() for line in stdout_str.splitlines() if line.strip()]
-            summary = "\n".join(stdout_lines[-10:]) if stdout_lines else "No console output."
-            escaped_summary = html.escape(summary)
+            # Generate smart summary of key metrics
+            pytest_sum = get_pytest_summary(stdout_str)
+            git_changes = get_git_changes()
+            pr_url = get_pr_url(stdout_str)
+            
+            summary_parts = []
+            summary_parts.append(f"✅ <b>{step['step_name']} completed successfully!</b>")
+            
+            if git_changes:
+                summary_parts.append(f"<b>Files changed:</b>\n{git_changes}")
+                
+            if pytest_sum:
+                summary_parts.append(f"<b>Tests status:</b> <code>{pytest_sum}</code>")
+                
+            if pr_url:
+                summary_parts.append(f"<b>PR Created:</b> <a href=\"{pr_url}\">{pr_url}</a>")
+                
+            # Fallback if no specific info was parsed
+            if not pytest_sum and not git_changes and not pr_url:
+                stdout_lines = [line.strip() for line in stdout_str.splitlines() if line.strip()]
+                last_lines = "\n".join(stdout_lines[-5:]) if stdout_lines else "No console output."
+                summary_parts.append(f"<b>Output Tail:</b>\n<pre>{html.escape(last_lines)}</pre>")
+                
             await update.message.reply_text(
-                f"✅ Step completed: <b>{step['step_name']}</b>\n\nSummary:\n<pre>{escaped_summary}</pre>",
-                parse_mode="HTML"
+                "\n\n".join(summary_parts),
+                parse_mode="HTML",
+                disable_web_page_preview=True
             )
                 
         except Exception as e:
