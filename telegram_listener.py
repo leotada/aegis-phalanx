@@ -133,6 +133,8 @@ PIPELINE_CONFIG = [
         "reasoning_budget": "low",
         "prompt": "Commit all changes using the Conventional Commits pattern. Push the current branch to origin. Use the 'gh' (GitHub CLI) tool to open a Pull Request detailing what was implemented and the test coverage."
     }
+]
+
 async def run_command_and_stream(command: List[str]) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *command,
