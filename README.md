@@ -7,7 +7,7 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
 ## Features
 
 - **TDD Workflow**: The pipeline enforces writing tests first, ensuring production code is only added to satisfy the tests (Red-Green-Refactor).
-- **SSH & Git Agent Forwarding**: Native support for using host SSH keys and agent configurations inside the container securely without raw key exposures.
+- **Secure Token Authentication**: Bypasses SSH passphrase prompts completely by dynamically cloning and pushing via HTTPS using your `GITHUB_TOKEN`.
 - **Multi-Model Orchestration**:
   1. **Architect**: Planning and tests (RED phase) via `gemini-3.1-pro` (high reasoning).
   2. **Developer**: Implementation (GREEN phase) via `gemini-3.5-flash` (medium reasoning).
@@ -21,13 +21,7 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
 - **Podman** and `podman compose` installed on the host.
 - A **Telegram Bot Token** (created via [@BotFather](https://t.me/BotFather)).
 - Your personal **Telegram Chat ID** (retrieved via [@userinfobot](https://t.me/userinfobot)).
-- A **GitHub Personal Access Token** with repository access (required for the GitHub CLI `gh`).
-- An active **SSH Agent** on your host with your Git/GitHub SSH key loaded.
-  - If your SSH key has a passphrase, you must add it to the host agent before starting the container so it can authenticate without password prompts:
-    ```bash
-    eval $(ssh-agent)
-    ssh-add ~/.ssh/id_rsa  # Or the path to your private key
-    ```
+- A **GitHub Personal Access Token** with repository access (required for cloning, pushing, and GitHub CLI `gh` PR creation).
 
 ## Installation & Setup
 
@@ -46,13 +40,13 @@ Fill in the variables in `.env`:
 GITHUB_TOKEN=your_github_token_here
 TELEGRAM_BOT_TOKEN=12345:AABBBCCC
 TELEGRAM_CHAT_ID=your_chat_id_here
-SSH_AUTH_SOCK=/run/user/1000/gnupg/S.gpg-agent.ssh  # Adjust to your host agent path
+DEFAULT_REPO=owner/repo  # Optional default repository
 ```
 
 ### 3. Spin Up the Containers
 Build and run the stack using Podman:
 ```bash
-podman compose -f podman-compose.yml --env-file .env up -d --build
+podman compose --env-file .env up -d --build
 ```
 This command builds the Fedora image with the required CLIs and starts the Telegram listener.
 
@@ -64,8 +58,20 @@ Go to your Telegram chat with the bot and send:
 The bot will respond that the Multi-Agent System is online.
 
 ### 5. Send a Demand
-Send any software engineering task to the bot. For example:
+Send any software engineering task to the bot. Since there are no host folders mounted, you must specify which repository you want the agent to clone and work on. 
+
+You can format your demand in two ways:
+
+#### A. Explicit repository prefix (Recommended for targeting specific repositories):
+```text
+owner/repository_name: Create a User database entity using SQLAlchemy. Write Pytest tests to verify database persistence and email format validation.
+```
+*Example with full HTTPS URL:*
+```text
+https://github.com/owner/repository_name.git: Create a User database entity...
+```
+
+#### B. Direct demand (Uses the `DEFAULT_REPO` configured in your `.env`):
 ```text
 Create a User database entity using SQLAlchemy. Write Pytest tests to verify database persistence and email format validation.
 ```
-The bot will orchestrate the pipeline and send you real-time status updates, culminating in a Pull Request opened on your GitHub repository.
