@@ -122,6 +122,8 @@ def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -
 SESSION_FILE_PATH = "/root/.config/aegis-phalanx/session.json"
 AGENT_STEP_TIMEOUT = os.environ.get("AGENT_STEP_TIMEOUT", "5m")
 AGENT_INTENT_TIMEOUT = os.environ.get("AGENT_INTENT_TIMEOUT", "15s")
+ACTIVE_TASKS = {}
+
 
 def save_session(repo_url: str, demand: str, last_completed_step: str, steps_status: dict, git_branch: str, session_file_path: str = SESSION_FILE_PATH) -> None:
     """Saves the current pipeline session metadata to a JSON file."""
@@ -387,12 +389,24 @@ async def run_command_and_stream(command: List[str], cwd: str = "/workspace") ->
             chunks.append(decoded)
             print(f"[{prefix}] {decoded.rstrip()}", flush=True)
             
-    await asyncio.gather(
-        read_stream(process.stdout, stdout_chunks, "STDOUT"),
-        read_stream(process.stderr, stderr_chunks, "STDERR")
-    )
+    try:
+        await asyncio.gather(
+            read_stream(process.stdout, stdout_chunks, "STDOUT"),
+            read_stream(process.stderr, stderr_chunks, "STDERR")
+        )
+        returncode = await process.wait()
+    except asyncio.CancelledError:
+        try:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+        except ProcessLookupError:
+            pass
+        raise
     
-    returncode = await process.wait()
     return returncode, "".join(stdout_chunks), "".join(stderr_chunks)
 
 def get_git_changes() -> str:
@@ -446,250 +460,273 @@ def get_pr_url() -> str:
     return ""
 
 async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_url: str, demand: str, is_resume: bool = False):
-    project_dir = "/workspace/project"
-    github_token = os.environ.get("GITHUB_TOKEN")
-
-    # Setup or load session data
-    session_data = load_session()
-    steps_status = {}
-    git_branch = ""
+    chat_id = str(update.effective_chat.id)
+    current_task = asyncio.current_task()
+    ACTIVE_TASKS[chat_id] = current_task
     
-    if is_resume:
-        if not session_data:
-            await update.message.reply_text("❌ Error: No previous session found to resume.")
-            return
-        repo_url = session_data["repo_url"]
-        demand = session_data["demand"]
-        git_branch = session_data["git_branch"]
-        steps_status = session_data.get("steps_status", {})
-        
-        # Determine starting step index
-        start_index = 0
-        for i, step in enumerate(PIPELINE_CONFIG):
-            step_name = step["step_name"]
-            if steps_status.get(step_name) != "success":
-                start_index = i
-                break
-        else:
-            await update.message.reply_text("✅ All steps in the last pipeline were already completed successfully!")
-            return
-            
-        await update.message.reply_text(
-            f"🔄 <b>Resuming pipeline for:</b>\n"
-            f"📦 <b>Repository:</b> <code>{repo_url}</code>\n"
-            f"💡 <b>Demand:</b> <code>{html.escape(demand)}</code>\n"
-            f"⏳ <b>Resuming from step:</b> <code>{PIPELINE_CONFIG[start_index]['step_name']}</code>",
-            parse_mode="HTML"
-        )
-    else:
-        # New demand: clean up previous session if any
-        clear_session()
-        start_index = 0
-        # Determine git branch name based on demand description
-        clean_name = re.sub(r'[^a-zA-Z0-9]', '-', demand.lower())[:30].strip('-')
-        git_branch = f"feature/{clean_name}"
-        
-        await update.message.reply_text(
-            f"🚀 <b>Starting Multi-Model TDD Pipeline</b>\n"
-            f"📦 <b>Repository:</b> <code>{repo_url}</code>\n"
-            f"💡 <b>Demand:</b> <code>{html.escape(demand)}</code>",
-            parse_mode="HTML"
-        )
-
-    # Check GITHUB_TOKEN requirement (only HTTPS clones require it)
-    if not github_token and repo_url and repo_url.startswith("https://github.com/"):
-        await update.message.reply_text("❌ Error: GITHUB_TOKEN environment variable is not defined and is required for HTTPS repository cloning.")
-        return
-
-    # Authenticate HTTPS repo URL if GITHUB_TOKEN is available
-    if github_token and repo_url:
-        auth_repo_url = repo_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
-    else:
-        auth_repo_url = repo_url
-
-    # Repository setup
+    step_name = None
+    idx = None
     try:
-        # If it is a new run, or the project folder is missing, we clone
-        if not is_resume or not os.path.exists(project_dir):
-            if os.path.exists(project_dir):
-                proc = await asyncio.create_subprocess_exec("rm", "-rf", project_dir)
-                await proc.wait()
+        project_dir = "/workspace/project"
+        github_token = os.environ.get("GITHUB_TOKEN")
 
-            await update.message.reply_text("📥 Cloning repository...")
-            clone_proc = await asyncio.create_subprocess_exec(
-                "git", "clone", auth_repo_url, project_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout_c, stderr_c = await clone_proc.communicate()
-            
-            if clone_proc.returncode != 0:
-                err = stderr_c.decode('utf-8', errors='replace')[:800]
-                await update.message.reply_text(
-                    f"❌ <b>Failed to clone repository.</b>\n<b>Stderr:</b>\n<pre>{html.escape(err)}</pre>",
-                    parse_mode="HTML"
-                )
-                return
-
-            for key, val in [("user.name", "Aegis Agent"), ("user.email", "agent@aegis-phalanx.local")]:
-                proc = await asyncio.create_subprocess_exec("git", "config", key, val, cwd=project_dir)
-                await proc.wait()
-
-        # Handle branch checkout for resume or new demand
+        # Setup or load session data
+        session_data = load_session()
+        steps_status = {}
+        git_branch = ""
+        
         if is_resume:
-            # Check if the branch exists locally
-            branch_exists_local = False
-            proc = await asyncio.create_subprocess_exec(
-                "git", "show-ref", "--verify", f"refs/heads/{git_branch}",
-                cwd=project_dir
-            )
-            await proc.wait()
-            if proc.returncode == 0:
-                branch_exists_local = True
-
-            if branch_exists_local:
-                proc = await asyncio.create_subprocess_exec("git", "checkout", git_branch, cwd=project_dir)
-                await proc.wait()
+            if not session_data:
+                await update.message.reply_text("❌ Error: No previous session found to resume.")
+                return
+            repo_url = session_data["repo_url"]
+            demand = session_data["demand"]
+            git_branch = session_data["git_branch"]
+            steps_status = session_data.get("steps_status", {})
+            
+            # Determine starting step index
+            start_index = 0
+            for i, step in enumerate(PIPELINE_CONFIG):
+                step_name = step["step_name"]
+                if steps_status.get(step_name) != "success":
+                    start_index = i
+                    break
             else:
-                # Try checkout from origin
+                await update.message.reply_text("✅ All steps in the last pipeline were already completed successfully!")
+                return
+                
+            await update.message.reply_text(
+                f"🔄 <b>Resuming pipeline for:</b>\n"
+                f"📦 <b>Repository:</b> <code>{repo_url}</code>\n"
+                f"💡 <b>Demand:</b> <code>{html.escape(demand)}</code>\n"
+                f"⏳ <b>Resuming from step:</b> <code>{PIPELINE_CONFIG[start_index]['step_name']}</code>",
+                parse_mode="HTML"
+            )
+        else:
+            # New demand: clean up previous session if any
+            clear_session()
+            start_index = 0
+            # Determine git branch name based on demand description
+            clean_name = re.sub(r'[^a-zA-Z0-9]', '-', demand.lower())[:30].strip('-')
+            git_branch = f"feature/{clean_name}"
+            
+            await update.message.reply_text(
+                f"🚀 <b>Starting Multi-Model TDD Pipeline</b>\n"
+                f"📦 <b>Repository:</b> <code>{repo_url}</code>\n"
+                f"💡 <b>Demand:</b> <code>{html.escape(demand)}</code>",
+                parse_mode="HTML"
+            )
+
+        # Check GITHUB_TOKEN requirement (only HTTPS clones require it)
+        if not github_token and repo_url and repo_url.startswith("https://github.com/"):
+            await update.message.reply_text("❌ Error: GITHUB_TOKEN environment variable is not defined and is required for HTTPS repository cloning.")
+            return
+
+        # Authenticate HTTPS repo URL if GITHUB_TOKEN is available
+        if github_token and repo_url:
+            auth_repo_url = repo_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
+        else:
+            auth_repo_url = repo_url
+
+        # Repository setup
+        try:
+            # If it is a new run, or the project folder is missing, we clone
+            if not is_resume or not os.path.exists(project_dir):
+                if os.path.exists(project_dir):
+                    proc = await asyncio.create_subprocess_exec("rm", "-rf", project_dir)
+                    await proc.wait()
+
+                await update.message.reply_text("📥 Cloning repository...")
+                clone_proc = await asyncio.create_subprocess_exec(
+                    "git", "clone", auth_repo_url, project_dir,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout_c, stderr_c = await clone_proc.communicate()
+                
+                if clone_proc.returncode != 0:
+                    err = stderr_c.decode('utf-8', errors='replace')[:800]
+                    await update.message.reply_text(
+                        f"❌ <b>Failed to clone repository.</b>\n<b>Stderr:</b>\n<pre>{html.escape(err)}</pre>",
+                        parse_mode="HTML"
+                    )
+                    return
+
+                for key, val in [("user.name", "Aegis Agent"), ("user.email", "agent@aegis-phalanx.local")]:
+                    proc = await asyncio.create_subprocess_exec("git", "config", key, val, cwd=project_dir)
+                    await proc.wait()
+
+            # Handle branch checkout for resume or new demand
+            if is_resume:
+                # Check if the branch exists locally
+                branch_exists_local = False
                 proc = await asyncio.create_subprocess_exec(
-                    "git", "checkout", "-b", git_branch, f"origin/{git_branch}",
+                    "git", "show-ref", "--verify", f"refs/heads/{git_branch}",
                     cwd=project_dir
                 )
                 await proc.wait()
-                if proc.returncode != 0:
-                    await update.message.reply_text(
-                        f"⚠️ <b>Warning:</b> The local branch <code>{git_branch}</code> and its commits were lost because the container was rebuilt or the directory was cleaned.\n"
-                        "Cannot resume. Restarting the pipeline from the beginning...",
-                        parse_mode="HTML"
-                    )
-                    start_index = 0
-                    is_resume = False
-                    # Create new branch
-                    proc = await asyncio.create_subprocess_exec("git", "checkout", "-b", git_branch, cwd=project_dir)
+                if proc.returncode == 0:
+                    branch_exists_local = True
+
+                if branch_exists_local:
+                    proc = await asyncio.create_subprocess_exec("git", "checkout", git_branch, cwd=project_dir)
                     await proc.wait()
-        else:
-            # Create new branch
-            proc = await asyncio.create_subprocess_exec("git", "checkout", "-b", git_branch, cwd=project_dir)
-            await proc.wait()
+                else:
+                    # Try checkout from origin
+                    proc = await asyncio.create_subprocess_exec(
+                        "git", "checkout", "-b", git_branch, f"origin/{git_branch}",
+                        cwd=project_dir
+                    )
+                    await proc.wait()
+                    if proc.returncode != 0:
+                        await update.message.reply_text(
+                            f"⚠️ <b>Warning:</b> The local branch <code>{git_branch}</code> and its commits were lost because the container was rebuilt or the directory was cleaned.\n"
+                            "Cannot resume. Restarting the pipeline from the beginning...",
+                            parse_mode="HTML"
+                        )
+                        start_index = 0
+                        is_resume = False
+                        # Create new branch
+                        proc = await asyncio.create_subprocess_exec("git", "checkout", "-b", git_branch, cwd=project_dir)
+                        await proc.wait()
+            else:
+                # Create new branch
+                proc = await asyncio.create_subprocess_exec("git", "checkout", "-b", git_branch, cwd=project_dir)
+                await proc.wait()
 
-    except Exception as e:
-        await update.message.reply_text(f"❌ Initialization error: {str(e)}")
-        return
+        except Exception as e:
+            await update.message.reply_text(f"❌ Initialization error: {str(e)}")
+            return
 
-    # Execute step loop
-    for idx in range(start_index, len(PIPELINE_CONFIG)):
-        step = PIPELINE_CONFIG[idx]
-        step_name = step["step_name"]
-        
-        await update.message.reply_text(
-            f"⏳ <b>Executing:</b> {step_name}\n🔧 <b>CLI:</b> <code>{step['tool']}</code> | <b>Model:</b> <code>{step['model']}</code> (Thinking: {step['reasoning_budget']})",
-            parse_mode="HTML"
-        )
-        
-        prompt_content = step['prompt'].format(
-            demand=demand,
-            repo_owner_name=extract_owner_repo(repo_url) or repo_url
-        )
-        
-        try:
-            agent_cli = AgentRegistry.get_agent(step['tool'])
-            command = agent_cli.build_command(
-                prompt=prompt_content,
-                model=step['model'],
-                reasoning_budget=step['reasoning_budget'],
-                timeout=step.get('timeout')
+        # Execute step loop
+        for idx in range(start_index, len(PIPELINE_CONFIG)):
+            step = PIPELINE_CONFIG[idx]
+            step_name = step["step_name"]
+            
+            await update.message.reply_text(
+                f"⏳ <b>Executing:</b> {step_name}\n🔧 <b>CLI:</b> <code>{step['tool']}</code> | <b>Model:</b> <code>{step['model']}</code> (Thinking: {step['reasoning_budget']})",
+                parse_mode="HTML"
             )
             
-            returncode, stdout_str, stderr_str = await run_command_and_stream(command, cwd=project_dir)
+            prompt_content = step['prompt'].format(
+                demand=demand,
+                repo_owner_name=extract_owner_repo(repo_url) or repo_url
+            )
             
-            if returncode != 0:
-                # Mark step as failed
+            try:
+                agent_cli = AgentRegistry.get_agent(step['tool'])
+                command = agent_cli.build_command(
+                    prompt=prompt_content,
+                    model=step['model'],
+                    reasoning_budget=step['reasoning_budget'],
+                    timeout=step.get('timeout')
+                )
+                
+                returncode, stdout_str, stderr_str = await run_command_and_stream(command, cwd=project_dir)
+                
+                if returncode != 0:
+                    # Mark step as failed
+                    steps_status[step_name] = "failed"
+                    save_session(repo_url, demand, step_name if idx == 0 else PIPELINE_CONFIG[idx-1]["step_name"], steps_status, git_branch)
+                    
+                    error_msg = f"⚠️ <b>Failure in step {step_name}:</b>\n\n"
+                    if stderr_str.strip():
+                        error_msg += f"<b>Stderr:</b>\n<pre>{html.escape(stderr_str[:800])}</pre>\n\n"
+                    if stdout_str.strip():
+                        error_msg += f"<b>Stdout:</b>\n<pre>{html.escape(stdout_str[:800])}</pre>"
+                    await update.message.reply_text(error_msg, parse_mode="HTML")
+                    return
+
+                # Mark step as successful
+                steps_status[step_name] = "success"
+                save_session(repo_url, demand, step_name, steps_status, git_branch)
+
+                # Generate smart summary of key metrics
+                pytest_sum = get_pytest_summary(stdout_str)
+                git_changes = get_git_changes()
+                pr_url = get_pr_url()
+                
+                summary_parts = []
+                summary_parts.append(f"✅ <b>{step_name} completed successfully!</b>")
+                
+                if git_changes:
+                    summary_parts.append(f"<b>Files changed:</b>\n{git_changes}")
+                    
+                if pytest_sum:
+                    summary_parts.append(f"<b>Tests status:</b> <code>{pytest_sum}</code>")
+                    
+                if pr_url:
+                    summary_parts.append(f"<b>PR Created:</b> <a href=\"{pr_url}\">{pr_url}</a>")
+                    
+                # Fallback if no specific info was parsed
+                if not pytest_sum and not git_changes and not pr_url:
+                    stdout_lines = [line.strip() for line in stdout_str.splitlines() if line.strip()]
+                    last_lines = "\n".join(stdout_lines[-7:]) if stdout_lines else "No console output."
+                    last_lines_escaped = html.escape(last_lines)
+                    last_lines_formatted = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', last_lines_escaped)
+                    summary_parts.append(f"<b>Output Tail:</b>\n{last_lines_formatted}")
+                    
+                await update.message.reply_text(
+                    "\n\n".join(summary_parts),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
+                )
+                    
+            except Exception as e:
                 steps_status[step_name] = "failed"
                 save_session(repo_url, demand, step_name if idx == 0 else PIPELINE_CONFIG[idx-1]["step_name"], steps_status, git_branch)
-                
-                error_msg = f"⚠️ <b>Failure in step {step_name}:</b>\n\n"
-                if stderr_str.strip():
-                    error_msg += f"<b>Stderr:</b>\n<pre>{html.escape(stderr_str[:800])}</pre>\n\n"
-                if stdout_str.strip():
-                    error_msg += f"<b>Stdout:</b>\n<pre>{html.escape(stdout_str[:800])}</pre>"
-                await update.message.reply_text(error_msg, parse_mode="HTML")
+                await update.message.reply_text(f"❌ System error in step {step_name}: {str(e)}")
                 return
 
-            # Mark step as successful
-            steps_status[step_name] = "success"
-            save_session(repo_url, demand, step_name, steps_status, git_branch)
+        final_pr_url = get_pr_url()
+        if not final_pr_url:
+            repo_owner_name = extract_owner_repo(repo_url) or repo_url
+            await update.message.reply_text("⏳ <b>Creating Pull Request...</b>", parse_mode="HTML")
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "gh", "pr", "create", "--fill", "--repo", repo_owner_name,
+                    cwd=project_dir,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout_pr, stderr_pr = await proc.communicate()
+                if proc.returncode == 0:
+                    final_pr_url = get_pr_url()
+                else:
+                    err_msg = stderr_pr.decode('utf-8', errors='replace').strip()
+                    await update.message.reply_text(f"⚠️ <b>Failed to create PR via CLI:</b>\n<pre>{html.escape(err_msg[:800])}</pre>", parse_mode="HTML")
+            except Exception as e:
+                await update.message.reply_text(f"⚠️ <b>Error creating PR:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
 
-            # Generate smart summary of key metrics
-            pytest_sum = get_pytest_summary(stdout_str)
-            git_changes = get_git_changes()
-            pr_url = get_pr_url()
-            
-            summary_parts = []
-            summary_parts.append(f"✅ <b>{step_name} completed successfully!</b>")
-            
-            if git_changes:
-                summary_parts.append(f"<b>Files changed:</b>\n{git_changes}")
-                
-            if pytest_sum:
-                summary_parts.append(f"<b>Tests status:</b> <code>{pytest_sum}</code>")
-                
-            if pr_url:
-                summary_parts.append(f"<b>PR Created:</b> <a href=\"{pr_url}\">{pr_url}</a>")
-                
-            # Fallback if no specific info was parsed
-            if not pytest_sum and not git_changes and not pr_url:
-                stdout_lines = [line.strip() for line in stdout_str.splitlines() if line.strip()]
-                last_lines = "\n".join(stdout_lines[-7:]) if stdout_lines else "No console output."
-                last_lines_escaped = html.escape(last_lines)
-                last_lines_formatted = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', last_lines_escaped)
-                summary_parts.append(f"<b>Output Tail:</b>\n{last_lines_formatted}")
-                
+        if final_pr_url:
             await update.message.reply_text(
-                "\n\n".join(summary_parts),
+                f"✅ <b>Multi-Model Pipeline completed successfully!</b>\n\n🔗 <b>PR Opened:</b> <a href=\"{final_pr_url}\">{final_pr_url}</a>",
                 parse_mode="HTML",
                 disable_web_page_preview=True
             )
-                
-        except Exception as e:
-            steps_status[step_name] = "failed"
-            save_session(repo_url, demand, step_name if idx == 0 else PIPELINE_CONFIG[idx-1]["step_name"], steps_status, git_branch)
-            await update.message.reply_text(f"❌ System error in step {step_name}: {str(e)}")
-            return
-
-    final_pr_url = get_pr_url()
-    if not final_pr_url:
-        repo_owner_name = extract_owner_repo(repo_url) or repo_url
-        await update.message.reply_text("⏳ <b>Creating Pull Request...</b>", parse_mode="HTML")
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "gh", "pr", "create", "--fill", "--repo", repo_owner_name,
-                cwd=project_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+        else:
+            await update.message.reply_text(
+                "✅ <b>Multi-Model Pipeline completed!</b>\n\n"
+                "⚠️ Could not confirm PR URL — check the repository manually or use <code>/status</code> to review completed steps.",
+                parse_mode="HTML"
             )
-            stdout_pr, stderr_pr = await proc.communicate()
-            if proc.returncode == 0:
-                final_pr_url = get_pr_url()
-            else:
-                err_msg = stderr_pr.decode('utf-8', errors='replace').strip()
-                await update.message.reply_text(f"⚠️ <b>Failed to create PR via CLI:</b>\n<pre>{html.escape(err_msg[:800])}</pre>", parse_mode="HTML")
-        except Exception as e:
-            await update.message.reply_text(f"⚠️ <b>Error creating PR:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
-
-    if final_pr_url:
-        await update.message.reply_text(
-            f"✅ <b>Multi-Model Pipeline completed successfully!</b>\n\n🔗 <b>PR Opened:</b> <a href=\"{final_pr_url}\">{final_pr_url}</a>",
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-    else:
-        await update.message.reply_text(
-            "✅ <b>Multi-Model Pipeline completed!</b>\n\n"
-            "⚠️ Could not confirm PR URL — check the repository manually or use <code>/status</code> to review completed steps.",
-            parse_mode="HTML"
-        )
-    clear_session()
+        clear_session()
+    except asyncio.CancelledError:
+        if step_name:
+            steps_status[step_name] = "failed"
+            last_completed = step_name if (idx is not None and idx == 0) else PIPELINE_CONFIG[idx-1]["step_name"]
+            save_session(repo_url, demand, last_completed, steps_status, git_branch)
+            await update.message.reply_text(
+                f"🛑 <b>Pipeline stopped in step:</b> <code>{step_name}</code>\n"
+                "You can resume later with <code>/continue</code>.",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text("🛑 Pipeline stopped during initialization.")
+        raise
+    finally:
+        if ACTIVE_TASKS.get(chat_id) == current_task:
+            ACTIVE_TASKS.pop(chat_id, None)
 
 async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
@@ -731,6 +768,17 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id != ALLOWED_CHAT_ID:
         return
     await send_status(update)
+
+async def handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id != ALLOWED_CHAT_ID:
+        return
+    task = ACTIVE_TASKS.get(chat_id)
+    if task and not task.done():
+        task.cancel()
+        await update.message.reply_text("🛑 Request to stop the pipeline sent.")
+    else:
+        await update.message.reply_text("ℹ️ No running pipeline to stop.")
 
 async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
@@ -782,6 +830,7 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Start the bot and get instructions"),
         BotCommand("continue", "Resume the last paused/failed pipeline step"),
         BotCommand("status", "Query current pipeline status and memory"),
+        BotCommand("stop", "Stop the current running pipeline"),
         BotCommand("clear", "Clear active session memory")
     ])
 
@@ -795,6 +844,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("continue", handle_continue))
     app.add_handler(CommandHandler("status", handle_status))
+    app.add_handler(CommandHandler("stop", handle_stop))
     app.add_handler(CommandHandler("clear", handle_clear))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_demand))
     return app

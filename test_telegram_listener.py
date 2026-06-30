@@ -191,6 +191,7 @@ async def test_post_init_registers_bot_commands():
         "start": "Start the bot and get instructions",
         "continue": "Resume the last paused/failed pipeline step",
         "status": "Query current pipeline status and memory",
+        "stop": "Stop the current running pipeline",
         "clear": "Clear active session memory"
     }
     
@@ -518,6 +519,119 @@ async def test_send_status_complete_session():
     assert "do something &amp; test" in status_msg
     assert "feature/do-something" in status_msg
     assert "Architect (Planning - PLAN)" in status_msg
+
+
+@pytest.mark.anyio
+async def test_run_pipeline_cancellation(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+    import asyncio
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    
+    mock_context = MagicMock()
+    
+    dummy_session = {
+        "repo_url": "https://github.com/owner/repo.git",
+        "demand": "test cancellation",
+        "git_branch": "feature/cancellation",
+        "last_completed_step": "Architect (Planning - PLAN)",
+        "steps_status": {
+            "Architect (Planning - PLAN)": "success"
+        }
+    }
+    
+    mock_save = MagicMock()
+    monkeypatch.setattr(telegram_listener, "load_session", lambda *args, **kwargs: dummy_session)
+    monkeypatch.setattr(telegram_listener, "save_session", mock_save)
+    
+    async def mock_run_command_and_stream(*args, **kwargs):
+        try:
+            await asyncio.sleep(10)
+            return 0, "", ""
+        except asyncio.CancelledError:
+            raise
+
+    monkeypatch.setattr(telegram_listener, "run_command_and_stream", mock_run_command_and_stream)
+    
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"", b"")
+    
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch("os.path.exists", return_value=True):
+        
+        task = asyncio.create_task(
+            telegram_listener.run_pipeline(
+                mock_update, mock_context,
+                "https://github.com/owner/repo.git", "test cancellation",
+                is_resume=True
+            )
+        )
+        
+        await asyncio.sleep(0.1)
+        task.cancel()
+        
+        with pytest.raises(asyncio.CancelledError):
+            await task
+            
+    mock_save.assert_called()
+    args, kwargs = mock_save.call_args
+    assert args[0] == "https://github.com/owner/repo.git"
+    assert args[1] == "test cancellation"
+    assert args[2] == "Architect (Planning - PLAN)"
+    assert args[3]["Test Developer (Testing - RED)"] == "failed"
+    
+    calls = [str(call) for call in mock_update.message.reply_text.call_args_list]
+    assert any("Pipeline stopped in step" in call for call in calls)
+
+
+@pytest.mark.anyio
+async def test_handle_stop_no_active_task():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+    
+    telegram_listener.ACTIVE_TASKS.clear()
+    
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"):
+        await telegram_listener.handle_stop(mock_update, mock_context)
+    mock_update.message.reply_text.assert_called_once_with(
+        "ℹ️ No running pipeline to stop."
+    )
+
+
+@pytest.mark.anyio
+async def test_handle_stop_with_active_task():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+    
+    mock_task = MagicMock()
+    mock_task.done.return_value = False
+    
+    chat_id = "12345"
+    telegram_listener.ACTIVE_TASKS[chat_id] = mock_task
+    
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"):
+        await telegram_listener.handle_stop(mock_update, mock_context)
+    
+    mock_task.cancel.assert_called_once()
+    mock_update.message.reply_text.assert_called_once_with(
+        "🛑 Request to stop the pipeline sent."
+    )
+    
+    telegram_listener.ACTIVE_TASKS.clear()
 
 
 
