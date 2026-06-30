@@ -357,3 +357,51 @@ async def test_pipeline_reports_honestly_when_no_pr_url(monkeypatch):
     # Must contain an honest indicator
     assert "Could not confirm PR" in final_call or "manually" in final_call
 
+
+def test_pipeline_config_steps():
+    """Verify that PIPELINE_CONFIG has the split Architect steps, modified Code Reviewer step, and Refactoring Developer step."""
+    from telegram_listener import PIPELINE_CONFIG
+    
+    # Verify we have 6 steps now
+    assert len(PIPELINE_CONFIG) == 6
+    
+    step_names = [step["step_name"] for step in PIPELINE_CONFIG]
+    assert step_names[0] == "Architect (Planning - PLAN)"
+    assert step_names[1] == "Test Developer (Testing - RED)"
+    assert step_names[2] == "Developer (Implementation - GREEN)"
+    assert step_names[3] == "Code Reviewer (Review - PLAN)"
+    assert step_names[4] == "Refactoring Developer (Refactoring - REFACTOR)"
+    assert step_names[5] == "GitOps (Documentation and PR)"
+    
+    # Verify Architect prompt contents/expectations
+    architect_prompt = PIPELINE_CONFIG[0]["prompt"]
+    assert "architect_plan.md" in architect_prompt
+    assert "Test Specification Plan" in architect_prompt
+    assert "Implementation Plan" in architect_prompt
+    
+    # Verify Test Developer prompt contents/expectations
+    test_developer_prompt = PIPELINE_CONFIG[1]["prompt"]
+    assert "architect_plan.md" in test_developer_prompt
+    assert "Test Specification Plan" in test_developer_prompt
+    assert "Do NOT delete" in test_developer_prompt
+    
+    # Verify Developer prompt contents/expectations
+    developer_prompt = PIPELINE_CONFIG[2]["prompt"]
+    assert "architect_plan.md" in developer_prompt
+    assert "Implementation Plan" in developer_prompt
+    assert "Do NOT delete" in developer_prompt
+
+    # Verify Code Reviewer prompt contents/expectations
+    reviewer_prompt = PIPELINE_CONFIG[3]["prompt"]
+    assert "architect_plan.md" in reviewer_prompt
+    assert "refactor_plan.md" in reviewer_prompt
+    assert "Do NOT modify" in reviewer_prompt
+    assert "delete the `architect_plan.md` file" in reviewer_prompt
+    
+    # Verify Refactoring Developer prompt contents/expectations
+    refactor_developer_prompt = PIPELINE_CONFIG[4]["prompt"]
+    assert "refactor_plan.md" in refactor_developer_prompt
+    assert "Strictly follow" in refactor_developer_prompt
+    assert "delete the `refactor_plan.md` file" in refactor_developer_prompt
+
+

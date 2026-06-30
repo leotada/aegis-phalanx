@@ -1,4 +1,4 @@
-.PHONY: up build down logs status test
+.PHONY: up build down restart logs status test
 
 up:
 	podman compose --env-file .env up -d
@@ -8,6 +8,9 @@ build:
 
 down:
 	podman compose down
+
+restart:
+	podman compose restart
 
 logs:
 	podman compose logs -f agent
