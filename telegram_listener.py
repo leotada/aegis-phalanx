@@ -93,6 +93,14 @@ def clear_session(session_file_path: str = SESSION_FILE_PATH) -> None:
             except Exception as e:
                 print(f"Error clearing session: {e}", flush=True)
 
+def delete_session(session_file_path: str = SESSION_FILE_PATH) -> None:
+    """Removes the persistent session file completely (including repo URL)."""
+    if os.path.exists(session_file_path):
+        try:
+            os.remove(session_file_path)
+        except Exception as e:
+            print(f"Error deleting session file: {e}", flush=True)
+
 async def classify_intent(message_text: str) -> str:
     """Classifies user messages using Gemini 3.5 Flash via agy CLI, with keyword fallback."""
     prompt = f"""Classify the user intent for a coding assistant bot.
@@ -575,7 +583,7 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if chat_id != ALLOWED_CHAT_ID:
         return
-    clear_session()
+    delete_session()
     await update.message.reply_text("🧹 Session memory cleared successfully.")
 
 async def send_status(update: Update):

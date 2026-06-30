@@ -7,6 +7,7 @@ from telegram_listener import (
     save_session,
     load_session,
     clear_session,
+    delete_session,
     classify_intent
 )
 
@@ -82,6 +83,10 @@ def test_save_load_clear_session(tmp_path):
     clear_session(session_file)
     session = load_session(session_file)
     assert session == {"repo_url": "https://github.com/owner/repo.git"}
+
+    # Delete session completely and assert it is removed
+    delete_session(session_file)
+    assert load_session(session_file) is None
 
 from unittest.mock import AsyncMock, patch
 
