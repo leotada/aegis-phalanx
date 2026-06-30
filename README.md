@@ -75,3 +75,23 @@ https://github.com/owner/repository_name.git: Create a User database entity...
 ```text
 Create a User database entity using SQLAlchemy. Write Pytest tests to verify database persistence and email format validation.
 ```
+
+---
+
+## Session Memory & Resuming Tasks
+
+If a pipeline step fails (e.g. due to credentials issues or external timeouts), Aegis Phalanx automatically stores the execution state inside a persistent configurations file (`~/.config/aegis-phalanx/session.json`). This allows you to fix the issue and resume the task without starting from scratch.
+
+### Commands
+
+- `/continue` or `/resume`: Resumes the pipeline starting from the first failed/incomplete step.
+- `/status`: Displays the status of each step, the active repository, the branch, and the demand description.
+- `/clear`: Deletes the current session memory.
+
+### Natural Language Resumption
+
+You can also send standard text messages, and the bot will automatically classify your intent using Gemini 3.5 Flash:
+- Asking the bot to *"continue"*, *"resume"*, or *"continuar a tarefa"* will trigger the resume flow.
+- Asking *"what was the last thing done"*, *"status"*, or *"memória"* will display the active task details.
+- Any other message will be interpreted as a new demand.
+

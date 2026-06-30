@@ -34,6 +34,7 @@ services:
       - DEFAULT_REPO=${DEFAULT_REPO}
     volumes:
       # Mounting directories for local login/credentials session files of the official CLIs
+      - ~/.config/aegis-phalanx:/root/.config/aegis-phalanx:Z
       - ~/.config/gh:/root/.config/gh:Z
       - ~/.config/claude:/root/.config/claude:Z
       - ~/.config/antigravity:/root/.config/antigravity:Z
