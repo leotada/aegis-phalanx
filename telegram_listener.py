@@ -48,6 +48,8 @@ def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -
     return None, demand
 
 SESSION_FILE_PATH = "/root/.config/aegis-phalanx/session.json"
+AGENT_STEP_TIMEOUT = os.environ.get("AGENT_STEP_TIMEOUT", "5m")
+AGENT_INTENT_TIMEOUT = os.environ.get("AGENT_INTENT_TIMEOUT", "15s")
 
 def save_session(repo_url: str, demand: str, last_completed_step: str, steps_status: dict, git_branch: str, session_file_path: str = SESSION_FILE_PATH) -> None:
     """Saves the current pipeline session metadata to a JSON file."""
@@ -117,7 +119,7 @@ Respond with ONLY the classification label (RESUME, QUERY_STATUS, or NEW_DEMAND)
         "agy",
         "--model", "Gemini 3.5 Flash (Low)",
         "--dangerously-skip-permissions",
-        "--print-timeout", "1m",
+        "--print-timeout", AGENT_INTENT_TIMEOUT,
         "--print", prompt
     ]
     try:
@@ -183,7 +185,7 @@ class AntigravityAgentCLI(AgentCLI):
             "agy",
             "--model", full_model_name,
             "--dangerously-skip-permissions",
-            "--print-timeout", "15m",
+            "--print-timeout", AGENT_STEP_TIMEOUT,
             "--print", prompt
         ]
 

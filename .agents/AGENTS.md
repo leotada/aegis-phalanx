@@ -22,3 +22,6 @@ This document outlines the operational guidelines and rules that all AI agents o
 * Adhere to SOLID design principles.
 * Ensure all database calls utilize parameterized queries or ORM abstractions.
 * Never commit secrets (API keys, Telegram bot tokens, GitHub tokens) to the git repository. Use environment variables.
+
+## 5. Development environment
+* Use podman compose to manage the development environment (with space).

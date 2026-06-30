@@ -11,13 +11,29 @@ from telegram_listener import (
     classify_intent
 )
 
-def test_antigravity_cli_timeout_argument():
+def test_antigravity_cli_timeout_argument(monkeypatch):
+    # Verify default step timeout is '5m'
     cli = AntigravityAgentCLI()
     cmd = cli.build_command("Test prompt", "gemini-3.5-flash", "low")
-    
-    # We want `--print-timeout 15m` to be present in the build command
     assert "--print-timeout" in cmd
-    assert "15m" in cmd
+    assert "5m" in cmd
+
+    # Verify we can override step timeout via env variable
+    monkeypatch.setenv("AGENT_STEP_TIMEOUT", "10m")
+    import importlib
+    import telegram_listener
+    importlib.reload(telegram_listener)
+    
+    try:
+        cli2 = telegram_listener.AntigravityAgentCLI()
+        cmd2 = cli2.build_command("Test prompt", "gemini-3.5-flash", "low")
+        assert "--print-timeout" in cmd2
+        assert "10m" in cmd2
+    finally:
+        monkeypatch.delenv("AGENT_STEP_TIMEOUT", raising=False)
+        importlib.reload(telegram_listener)
+
+
 
 def test_sanitize_environment_removes_placeholder_token():
     os.environ["GITHUB_TOKEN"] = "your_github_token_here"
