@@ -71,10 +71,11 @@ owner/repository_name: Create a User database entity using SQLAlchemy. Write Pyt
 https://github.com/owner/repository_name.git: Create a User database entity...
 ```
 
-#### B. Direct demand (Uses the `DEFAULT_REPO` configured in your `.env`):
+#### B. Direct demand (Uses defaults/memory):
 ```text
 Create a User database entity using SQLAlchemy. Write Pytest tests to verify database persistence and email format validation.
 ```
+*Note: If no repository prefix is provided in the message, the bot will automatically fall back to the `DEFAULT_REPO` defined in your `.env` file. If `DEFAULT_REPO` is not defined, it will fall back to the **last used repository** stored in session memory.*
 
 ---
 

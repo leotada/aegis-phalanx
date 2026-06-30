@@ -16,7 +16,7 @@ def sanitize_environment() -> None:
 
 sanitize_environment()
 
-def parse_demand(demand: str, default_repo: str = None) -> tuple[str, str]:
+def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -> tuple[str, str]:
     """
     Parses the user's demand to extract the repository URL and the clean demand description.
     """
@@ -31,6 +31,14 @@ def parse_demand(demand: str, default_repo: str = None) -> tuple[str, str]:
     
     if default_repo:
         repo_url = default_repo
+        if repo_url.lower().endswith(".git"):
+            repo_url = repo_url[:-4]
+        if not repo_url.startswith("http"):
+            repo_url = f"https://github.com/{repo_url}.git"
+        return repo_url, demand
+        
+    if last_repo:
+        repo_url = last_repo
         if repo_url.lower().endswith(".git"):
             repo_url = repo_url[:-4]
         if not repo_url.startswith("http"):
@@ -69,12 +77,21 @@ def load_session(session_file_path: str = SESSION_FILE_PATH) -> dict:
         return None
 
 def clear_session(session_file_path: str = SESSION_FILE_PATH) -> None:
-    """Removes the persistent session file."""
-    if os.path.exists(session_file_path):
+    """Clears the active task session details but retains the last repo URL."""
+    session = load_session(session_file_path)
+    if session and "repo_url" in session:
         try:
-            os.remove(session_file_path)
+            data = {"repo_url": session["repo_url"]}
+            with open(session_file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
         except Exception as e:
             print(f"Error clearing session: {e}", flush=True)
+    else:
+        if os.path.exists(session_file_path):
+            try:
+                os.remove(session_file_path)
+            except Exception as e:
+                print(f"Error clearing session: {e}", flush=True)
 
 async def classify_intent(message_text: str) -> str:
     """Classifies user messages using Gemini 3.5 Flash via agy CLI, with keyword fallback."""
@@ -530,7 +547,9 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # NEW_DEMAND
         default_repo = os.environ.get("DEFAULT_REPO")
-        repo_url, demand = parse_demand(raw_demand, default_repo)
+        session = load_session()
+        last_repo = session.get("repo_url") if session else None
+        repo_url, demand = parse_demand(raw_demand, default_repo, last_repo)
         
         if not repo_url:
             await update.message.reply_text(

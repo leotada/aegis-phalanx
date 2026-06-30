@@ -48,6 +48,11 @@ def test_parse_demand_no_default_and_no_pattern():
     assert repo is None
     assert clean_demand == "just a description with no default"
 
+def test_parse_demand_fallback_to_last_repo():
+    repo, clean_demand = parse_demand("just a description", None, "owner/last-repo")
+    assert repo == "https://github.com/owner/last-repo.git"
+    assert clean_demand == "just a description"
+
 def test_save_load_clear_session(tmp_path):
     session_file = tmp_path / "session.json"
     
@@ -73,9 +78,10 @@ def test_save_load_clear_session(tmp_path):
     assert session["steps_status"]["Architect"] == "success"
     assert session["git_branch"] == "feature/user-auth"
     
-    # Clear session and assert it is removed
+    # Clear session and assert it retains only the repo_url
     clear_session(session_file)
-    assert load_session(session_file) is None
+    session = load_session(session_file)
+    assert session == {"repo_url": "https://github.com/owner/repo.git"}
 
 from unittest.mock import AsyncMock, patch
 
