@@ -23,10 +23,13 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
 - Your personal **Telegram Chat ID** (retrieved via [@userinfobot](https://t.me/userinfobot)).
 - A **GitHub Personal Access Token** with repository access (required for the GitHub CLI `gh`).
 - An active **SSH Agent** on your host with your Git/GitHub SSH key loaded.
+  - If your SSH key has a passphrase, you must add it to the host agent before starting the container so it can authenticate without password prompts:
+    ```bash
+    eval $(ssh-agent)
+    ssh-add ~/.ssh/id_rsa  # Or the path to your private key
+    ```
 
----
-
-## Getting Started
+## Installation & Setup
 
 ### 1. Configure local sessions for official CLIs
 Before running the container, make sure you have logged in to the CLIs on your host machine so the credentials can be mapped properly:
@@ -49,9 +52,9 @@ SSH_AUTH_SOCK=/run/user/1000/gnupg/S.gpg-agent.ssh  # Adjust to your host agent 
 ### 3. Spin Up the Containers
 Build and run the stack using Podman:
 ```bash
-podman compose --env-file .env up -d --build
+podman compose -f podman-compose.yml --env-file .env up -d --build
 ```
-This commands builds the Fedora image with the required CLIs and starts the Telegram listener.
+This command builds the Fedora image with the required CLIs and starts the Telegram listener.
 
 ### 4. Activate the Bot
 Go to your Telegram chat with the bot and send:

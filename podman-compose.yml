@@ -34,6 +34,7 @@ services:
       - SSH_AUTH_SOCK=${SSH_AUTH_SOCK}
       - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
     volumes:
+      - ./:/workspace:Z
       # Mounting directories for local login/credentials session files of the official CLIs
       - ~/.config/gh:/root/.config/gh:Z
       - ~/.config/claude:/root/.config/claude:Z
