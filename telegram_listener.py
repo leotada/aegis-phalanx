@@ -10,8 +10,9 @@ from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, Application
 
 def sanitize_environment() -> None:
-    """Removes GITHUB_TOKEN if it is still set to the default placeholder."""
-    if os.environ.get("GITHUB_TOKEN") == "your_github_token_here":
+    """Removes GITHUB_TOKEN if it is set to the default placeholder, empty, or whitespace only."""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not token or token == "your_github_token_here":
         os.environ.pop("GITHUB_TOKEN", None)
 
 sanitize_environment()
@@ -390,7 +391,8 @@ def get_pr_url() -> str:
     """Uses the GitHub CLI to get the PR URL for the current branch, if one exists."""
     try:
         result = subprocess.run(
-            ["podman", "compose", "exec", "-T", "agent", "bash", "-c", "cd /workspace/project && gh pr view --json url -q .url"],
+            ["gh", "pr", "view", "--json", "url", "-q", ".url"],
+            cwd="/workspace/project",
             capture_output=True,
             text=True,
             check=False
