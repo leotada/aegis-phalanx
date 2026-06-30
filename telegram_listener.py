@@ -1,5 +1,6 @@
 import os
 import asyncio
+import html
 from abc import ABC, abstractmethod
 from typing import Dict, List, Type
 from telegram import Update
@@ -167,8 +168,22 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stderr_str = stderr.decode('utf-8', errors='replace')
             
             if process.returncode != 0:
-                await update.message.reply_text(f"⚠️ Failure in step {step['step_name']}:\n\n{stderr_str[:1000]}")
+                error_msg = f"⚠️ Failure in step {step['step_name']}:\n\n"
+                if stderr_str.strip():
+                    error_msg += f"Stderr:\n{stderr_str[:800]}\n\n"
+                if stdout_str.strip():
+                    error_msg += f"Stdout:\n{stdout_str[:800]}"
+                await update.message.reply_text(error_msg)
                 return
+
+            # On success, send a short summary of the output (max 10 lines)
+            stdout_lines = [line.strip() for line in stdout_str.splitlines() if line.strip()]
+            summary = "\n".join(stdout_lines[-10:]) if stdout_lines else "No console output."
+            escaped_summary = html.escape(summary)
+            await update.message.reply_text(
+                f"✅ Step completed: <b>{step['step_name']}</b>\n\nSummary:\n<pre>{escaped_summary}</pre>",
+                parse_mode="HTML"
+            )
                 
         except Exception as e:
             await update.message.reply_text(f"❌ System error in step {step['step_name']}: {str(e)}")
