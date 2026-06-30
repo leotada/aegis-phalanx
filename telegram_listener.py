@@ -15,6 +15,29 @@ def sanitize_environment() -> None:
 
 sanitize_environment()
 
+def parse_demand(demand: str, default_repo: str = None) -> tuple[str, str]:
+    """
+    Parses the user's demand to extract the repository URL and the clean demand description.
+    """
+    # Pattern: optional URL prefix, then owner/repo, then ':'
+    match_repo = re.match(r'^(?:https://github\.com/)?([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+)(?:\.git)?\s*:\s*(.*)$', demand, re.IGNORECASE)
+    if match_repo:
+        repo_name = match_repo.group(1)
+        if repo_name.lower().endswith(".git"):
+            repo_name = repo_name[:-4]
+        clean_demand = match_repo.group(2).strip()
+        return f"https://github.com/{repo_name}.git", clean_demand
+    
+    if default_repo:
+        repo_url = default_repo
+        if repo_url.lower().endswith(".git"):
+            repo_url = repo_url[:-4]
+        if not repo_url.startswith("http"):
+            repo_url = f"https://github.com/{repo_url}.git"
+        return repo_url, demand
+        
+    return None, demand
+
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 ALLOWED_CHAT_ID = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
@@ -144,11 +167,12 @@ PIPELINE_CONFIG = [
     }
 ]
 
-async def run_command_and_stream(command: List[str]) -> tuple[int, str, str]:
+async def run_command_and_stream(command: List[str], cwd: str = "/workspace") -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd
     )
     
     stdout_chunks = []
@@ -175,7 +199,7 @@ def get_git_changes() -> str:
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd="/workspace",
+            cwd="/workspace/project",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
@@ -206,6 +230,7 @@ def get_pytest_summary(output: str) -> str:
     return ""
 
 def get_pr_url(output: str) -> str:
+    # Match pull request creation URLs in stdout
     match = re.search(r'(https://github\.com/[^\s]+/pull/\d+)', output)
     if match:
         return match.group(1)
@@ -216,8 +241,61 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id != ALLOWED_CHAT_ID:
         return
 
-    demand = update.message.text
-    await update.message.reply_text(f"🚀 Starting Multi-Model TDD Pipeline for demand:\n\n{demand}")
+    raw_demand = update.message.text
+    
+    # 1. Parse repository and clean demand
+    default_repo = os.environ.get("DEFAULT_REPO")
+    repo_url, demand = parse_demand(raw_demand, default_repo)
+    
+    if not repo_url:
+        await update.message.reply_text(
+            "❌ Error: No repository specified. Please prefix your demand with your repository (e.g. `owner/repo: my demand`) or configure `DEFAULT_REPO` in .env."
+        )
+        return
+        
+    github_token = os.environ.get("GITHUB_TOKEN")
+    if not github_token:
+        await update.message.reply_text("❌ Error: GITHUB_TOKEN environment variable is not defined.")
+        return
+
+    # Embed token for HTTPS authentication to bypass SSH passphrase prompts
+    auth_repo_url = repo_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
+    project_dir = "/workspace/project"
+
+    await update.message.reply_text(
+        f"🚀 Starting Multi-Model TDD Pipeline\n"
+        f"📦 Repository: `{repo_url}`\n"
+        f"💡 Demand: `{demand}`"
+    )
+
+    try:
+        # Clean up existing workspace project folder
+        if os.path.exists(project_dir):
+            proc = await asyncio.create_subprocess_exec("rm", "-rf", project_dir)
+            await proc.wait()
+
+        # Clone repository
+        await update.message.reply_text("📥 Cloning repository...")
+        clone_proc = await asyncio.create_subprocess_exec(
+            "git", "clone", auth_repo_url, project_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout_c, stderr_c = await clone_proc.communicate()
+        
+        if clone_proc.returncode != 0:
+            err = stderr_c.decode('utf-8', errors='replace')[:800]
+            await update.message.reply_text(f"❌ Failed to clone repository.\nStderr:\n{err}")
+            return
+
+        # Setup local git config so commits don't fail inside the container
+        for key, val in [("user.name", "Aegis Agent"), ("user.email", "agent@aegis-phalanx.local")]:
+            proc = await asyncio.create_subprocess_exec("git", "config", key, val, cwd=project_dir)
+            await proc.wait()
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Initialization error: {str(e)}")
+        return
 
     for step in PIPELINE_CONFIG:
         await update.message.reply_text(
@@ -235,7 +313,7 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reasoning_budget=step['reasoning_budget']
             )
             
-            returncode, stdout_str, stderr_str = await run_command_and_stream(command)
+            returncode, stdout_str, stderr_str = await run_command_and_stream(command, cwd=project_dir)
             
             if returncode != 0:
                 error_msg = f"⚠️ Failure in step {step['step_name']}:\n\n"

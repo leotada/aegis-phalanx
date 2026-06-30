@@ -29,12 +29,10 @@ services:
       # Infrastructure
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID} # Security: Dedicated bot for your user only
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - DATABASE_URL=postgresql://admin:admin@db:5432/appdb
-      - SSH_AUTH_SOCK=${SSH_AUTH_SOCK}
-      - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+      - DEFAULT_REPO=${DEFAULT_REPO}
     volumes:
-      - ./:/workspace:Z
       # Mounting directories for local login/credentials session files of the official CLIs
       - ~/.config/gh:/root/.config/gh:Z
       - ~/.config/claude:/root/.config/claude:Z
@@ -42,12 +40,6 @@ services:
       - ~/.gemini/antigravity:/root/.gemini/antigravity:Z
       - ~/.gemini/antigravity-cli:/root/.gemini/antigravity-cli:Z
       - ~/.antigravity:/root/.antigravity:Z
-      # Mounting user's local SSH Agent socket for Git/GitHub SSH authentication
-      - ${SSH_AUTH_SOCK}:${SSH_AUTH_SOCK}:z
-      # Mounting host ~/.ssh directory for keys and known_hosts
-      - ~/.ssh:/root/.ssh:ro,z
-      # Mounting host DBus socket for keyring access
-      - /run/user/1000/bus:/run/user/1000/bus:z
     networks:
       - agent_network
     working_dir: /workspace
