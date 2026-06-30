@@ -7,7 +7,7 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
 ## Features
 
 - **TDD Workflow**: The pipeline enforces writing tests first, ensuring production code is only added to satisfy the tests (Red-Green-Refactor).
-- **Secure Token Authentication**: Bypasses SSH passphrase prompts completely by dynamically cloning and pushing via HTTPS using your `GITHUB_TOKEN`.
+- **Flexible Authentication**: Supports both HTTPS cloning (using your `GITHUB_TOKEN`) and SSH cloning (using a dedicated passphrase-less key isolated within the container).
 - **Multi-Model Orchestration**:
   1. **Architect**: Planning and tests (RED phase) via `gemini-3.1-pro` (high reasoning).
   2. **Developer**: Implementation (GREEN phase) via `gemini-3.5-flash` (medium reasoning).
@@ -21,7 +21,9 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
 - **Podman** and `podman compose` installed on the host.
 - A **Telegram Bot Token** (created via [@BotFather](https://t.me/BotFather)).
 - Your personal **Telegram Chat ID** (retrieved via [@userinfobot](https://t.me/userinfobot)).
-- A **GitHub Personal Access Token** with repository access (required for cloning, pushing, and GitHub CLI `gh` PR creation).
+- **Authentication Credentials**:
+  - For HTTPS cloning: A **GitHub Personal Access Token** with repository access.
+  - For SSH cloning: A **passphrase-less SSH key** (e.g. `~/.ssh/id_aegis`) configured in your GitHub account.
 
 ## Installation & Setup
 
@@ -30,14 +32,23 @@ Before running the container, make sure you have logged in to the CLIs on your h
 - For Claude Code: `claude auth login` (stores session in `~/.config/claude`)
 - For Antigravity: `agy login` or equivalent configuration (stores session in `~/.config/antigravity`)
 
-### 2. Configure Environment Variables
+### 2. Configure SSH Key Authentication (Optional)
+If you wish to use SSH authentication instead of `GITHUB_TOKEN`:
+1. Generate a dedicated passphrase-less SSH key specifically for the agent:
+   ```bash
+   ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_aegis
+   ```
+2. Copy the contents of `~/.ssh/id_aegis.pub` and add it to your GitHub account (Settings -> SSH and GPG keys) or as a Deploy Key on your target repository.
+3. The `compose.yml` file is configured to mount this key to `/root/.ssh/id_aegis` and use the `GIT_SSH_COMMAND` environment variable to enforce its usage inside the container.
+
+### 3. Configure Environment Variables
 Copy `.env.example` to `.env` and fill in the values:
 ```bash
 cp .env.example .env
 ```
 Fill in the variables in `.env`:
 ```env
-GITHUB_TOKEN=your_github_token_here
+GITHUB_TOKEN=your_github_token_here  # Leave blank if cloning via SSH
 TELEGRAM_BOT_TOKEN=12345:AABBBCCC
 TELEGRAM_CHAT_ID=your_chat_id_here
 DEFAULT_REPO=owner/repo  # Optional default repository
