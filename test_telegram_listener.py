@@ -405,3 +405,56 @@ def test_pipeline_config_steps():
     assert "delete the `refactor_plan.md` file" in refactor_developer_prompt
 
 
+@pytest.mark.anyio
+async def test_pipeline_orchestrates_pr_creation_on_fallback(monkeypatch):
+    """Verify that when no PR URL is found at the end of the pipeline, the orchestrator invokes gh pr create."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+
+    mock_context = MagicMock()
+
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"", b"")
+
+    # We want to mock get_pr_url to return "" first, but when called after pr create, return a PR URL
+    def mock_get_pr_url_side_effect():
+        for call in mock_exec.call_args_list:
+            if call[0] and call[0][0] == "gh" and call[0][1] == "pr" and call[0][2] == "create":
+                return "https://github.com/owner/repo/pull/42"
+        return ""
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec, \
+         patch.object(telegram_listener, "get_pr_url", side_effect=mock_get_pr_url_side_effect), \
+         patch.object(telegram_listener, "get_git_changes", return_value=""), \
+         patch.object(telegram_listener, "get_pytest_summary", return_value=""), \
+         patch.object(telegram_listener, "run_command_and_stream", return_value=(0, "", "")):
+
+        await telegram_listener.run_pipeline(
+            mock_update, mock_context,
+            "git@github.com:owner/repo.git", "test demand"
+        )
+
+        # Verify that gh pr create was executed
+        mock_exec.assert_any_call(
+            "gh", "pr", "create", "--fill", "--repo", "owner/repo",
+            cwd="/workspace/project",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+    # Gather all reply_text calls
+    calls = [str(call) for call in mock_update.message.reply_text.call_args_list]
+    final_call = calls[-1] if calls else ""
+
+    # Must report the opened PR link
+    assert "https://github.com/owner/repo/pull/42" in final_call
+
+
+

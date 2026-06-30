@@ -340,7 +340,7 @@ PIPELINE_CONFIG = [
         "model": "gemini-3.5-flash",
         "reasoning_budget": "medium",
         "timeout": "10m",
-        "prompt": "Read the newly created tests that are currently failing and the `architect_plan.md` file in the root of the repository. Act as a Developer. Strictly follow the 'Implementation Plan' section of `architect_plan.md` to write the minimum and strictly necessary production code to make the tests pass (GREEN Phase). Run the tests until all of them pass perfectly. Run lint and other quality tools to ensure the code quality and fix any issues found. Dot not delete `architect_plan.md` as it is needed by the Reviewer in the next step."
+        "prompt": "Read the newly created tests that are currently failing and the `architect_plan.md` file in the root of the repository. Act as a Developer. Strictly follow the 'Implementation Plan' section of `architect_plan.md` to write the minimum and strictly necessary production code to make the tests pass (GREEN Phase). Run the tests until all of them pass perfectly. Run lint and other quality tools to ensure the code quality and fix any issues found. Do NOT delete `architect_plan.md` as it is needed by the Reviewer in the next step."
     },
     {
         "step_name": "Code Reviewer (Review - PLAN)",
@@ -363,7 +363,7 @@ PIPELINE_CONFIG = [
         "tool": "agy",
         "model": "gemini-3.5-flash",
         "reasoning_budget": "low",
-        "prompt": "Commit all changes using the Conventional Commits pattern. Push the current branch to origin using `git push origin HEAD`. Then use the GitHub CLI to open a Pull Request: run `gh pr create --fill --repo {repo_owner_name}`. If the push fails, retry once. If PR creation fails, output the exact error and do NOT skip it silently — report the failure. Do not mark this task complete without a confirmed PR URL."
+        "prompt": "Commit all changes using the Conventional Commits pattern. Push the current branch to origin using `git push origin HEAD`. If the push fails, retry once. Note: The Pull Request will be created automatically by the system orchestrator, so you do NOT need to run `gh pr create` yourself."
     }
 ]
 
@@ -658,6 +658,25 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             return
 
     final_pr_url = get_pr_url()
+    if not final_pr_url:
+        repo_owner_name = extract_owner_repo(repo_url) or repo_url
+        await update.message.reply_text("⏳ <b>Creating Pull Request...</b>", parse_mode="HTML")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "gh", "pr", "create", "--fill", "--repo", repo_owner_name,
+                cwd=project_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout_pr, stderr_pr = await proc.communicate()
+            if proc.returncode == 0:
+                final_pr_url = get_pr_url()
+            else:
+                err_msg = stderr_pr.decode('utf-8', errors='replace').strip()
+                await update.message.reply_text(f"⚠️ <b>Failed to create PR via CLI:</b>\n<pre>{html.escape(err_msg[:800])}</pre>", parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ <b>Error creating PR:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
     if final_pr_url:
         await update.message.reply_text(
             f"✅ <b>Multi-Model Pipeline completed successfully!</b>\n\n🔗 <b>PR Opened:</b> <a href=\"{final_pr_url}\">{final_pr_url}</a>",
