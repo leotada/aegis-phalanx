@@ -431,10 +431,11 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             return
             
         await update.message.reply_text(
-            f"🔄 Resuming pipeline for:\n"
-            f"📦 Repository: `{repo_url}`\n"
-            f"💡 Demand: `{demand}`\n"
-            f"⏳ Resuming from step: `{PIPELINE_CONFIG[start_index]['step_name']}`"
+            f"🔄 <b>Resuming pipeline for:</b>\n"
+            f"📦 <b>Repository:</b> <code>{repo_url}</code>\n"
+            f"💡 <b>Demand:</b> <code>{html.escape(demand)}</code>\n"
+            f"⏳ <b>Resuming from step:</b> <code>{PIPELINE_CONFIG[start_index]['step_name']}</code>",
+            parse_mode="HTML"
         )
     else:
         # New demand: clean up previous session if any
@@ -445,9 +446,10 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
         git_branch = f"feature/{clean_name}"
         
         await update.message.reply_text(
-            f"🚀 Starting Multi-Model TDD Pipeline\n"
-            f"📦 Repository: `{repo_url}`\n"
-            f"💡 Demand: `{demand}`"
+            f"🚀 <b>Starting Multi-Model TDD Pipeline</b>\n"
+            f"📦 <b>Repository:</b> <code>{repo_url}</code>\n"
+            f"💡 <b>Demand:</b> <code>{html.escape(demand)}</code>",
+            parse_mode="HTML"
         )
 
     # Check GITHUB_TOKEN requirement (only HTTPS clones require it)
@@ -479,7 +481,10 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             
             if clone_proc.returncode != 0:
                 err = stderr_c.decode('utf-8', errors='replace')[:800]
-                await update.message.reply_text(f"❌ Failed to clone repository.\nStderr:\n{err}")
+                await update.message.reply_text(
+                    f"❌ <b>Failed to clone repository.</b>\n<b>Stderr:</b>\n<pre>{html.escape(err)}</pre>",
+                    parse_mode="HTML"
+                )
                 return
 
             for key, val in [("user.name", "Aegis Agent"), ("user.email", "agent@aegis-phalanx.local")]:
@@ -510,8 +515,9 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                 await proc.wait()
                 if proc.returncode != 0:
                     await update.message.reply_text(
-                        f"⚠️ Warning: The local branch `{git_branch}` and its commits were lost because the container was rebuilt or the directory was cleaned.\n"
-                        "Cannot resume. Restarting the pipeline from the beginning..."
+                        f"⚠️ <b>Warning:</b> The local branch <code>{git_branch}</code> and its commits were lost because the container was rebuilt or the directory was cleaned.\n"
+                        "Cannot resume. Restarting the pipeline from the beginning...",
+                        parse_mode="HTML"
                     )
                     start_index = 0
                     is_resume = False
@@ -533,7 +539,8 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
         step_name = step["step_name"]
         
         await update.message.reply_text(
-            f"⏳ Executing: {step_name}\n🔧 CLI: `{step['tool']}` | Model: `{step['model']}` (Thinking: {step['reasoning_budget']})"
+            f"⏳ <b>Executing:</b> {step_name}\n🔧 <b>CLI:</b> <code>{step['tool']}</code> | <b>Model:</b> <code>{step['model']}</code> (Thinking: {step['reasoning_budget']})",
+            parse_mode="HTML"
         )
         
         prompt_content = step['prompt'].format(demand=demand)
@@ -553,12 +560,12 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                 steps_status[step_name] = "failed"
                 save_session(repo_url, demand, step_name if idx == 0 else PIPELINE_CONFIG[idx-1]["step_name"], steps_status, git_branch)
                 
-                error_msg = f"⚠️ Failure in step {step_name}:\n\n"
+                error_msg = f"⚠️ <b>Failure in step {step_name}:</b>\n\n"
                 if stderr_str.strip():
-                    error_msg += f"Stderr:\n{stderr_str[:800]}\n\n"
+                    error_msg += f"<b>Stderr:</b>\n<pre>{html.escape(stderr_str[:800])}</pre>\n\n"
                 if stdout_str.strip():
-                    error_msg += f"Stdout:\n{stdout_str[:800]}"
-                await update.message.reply_text(error_msg)
+                    error_msg += f"<b>Stdout:</b>\n<pre>{html.escape(stdout_str[:800])}</pre>"
+                await update.message.reply_text(error_msg, parse_mode="HTML")
                 return
 
             # Mark step as successful
