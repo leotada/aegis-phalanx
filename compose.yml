@@ -34,6 +34,7 @@ services:
       - DEFAULT_REPO=${DEFAULT_REPO}
       - AGENT_STEP_TIMEOUT=${AGENT_STEP_TIMEOUT:-5m}
       - AGENT_INTENT_TIMEOUT=${AGENT_INTENT_TIMEOUT:-15s}
+      - SSH_AUTH_SOCK=${SSH_AUTH_SOCK}
     volumes:
       # Mounting directories for local login/credentials session files of the official CLIs
       - ~/.config/aegis-phalanx:/root/.config/aegis-phalanx:Z
@@ -43,6 +44,8 @@ services:
       - ~/.gemini/antigravity:/root/.gemini/antigravity:Z
       - ~/.gemini/antigravity-cli:/root/.gemini/antigravity-cli:Z
       - ~/.antigravity:/root/.antigravity:Z
+      - ${SSH_AUTH_SOCK:-/dev/null}:${SSH_AUTH_SOCK:-/dev/null}
+      - ~/.ssh:/root/.ssh:ro
     networks:
       - agent_network
     working_dir: /workspace

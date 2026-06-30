@@ -1,5 +1,6 @@
 import os
 import pytest
+import asyncio
 from telegram_listener import (
     AntigravityAgentCLI,
     sanitize_environment,
@@ -180,28 +181,28 @@ def test_build_application():
 def test_parse_demand_various_formats():
     # SSH formats
     repo, clean = parse_demand("git@github.com:owner/repo.git: test demand", None)
-    assert repo == "https://github.com/owner/repo.git"
+    assert repo == "git@github.com:owner/repo.git"
     assert clean == "test demand"
 
     repo, clean = parse_demand("git@github.com:owner/repo: test demand", None)
-    assert repo == "https://github.com/owner/repo.git"
+    assert repo == "git@github.com:owner/repo.git"
     assert clean == "test demand"
 
     repo, clean = parse_demand("git@github.com:owner/repo.git test demand", None)
-    assert repo == "https://github.com/owner/repo.git"
+    assert repo == "git@github.com:owner/repo.git"
     assert clean == "test demand"
 
     repo, clean = parse_demand("git@github.com:owner/repo test demand", None)
-    assert repo == "https://github.com/owner/repo.git"
+    assert repo == "git@github.com:owner/repo.git"
     assert clean == "test demand"
 
     repo, clean = parse_demand("git@github.com:owner/repo.git", None)
-    assert repo == "https://github.com/owner/repo.git"
+    assert repo == "git@github.com:owner/repo.git"
     assert clean == ""
 
     # SSH URI format
     repo, clean = parse_demand("ssh://git@github.com/owner/repo.git: test demand", None)
-    assert repo == "https://github.com/owner/repo.git"
+    assert repo == "git@github.com:owner/repo.git"
     assert clean == "test demand"
 
     # HTTPS formats
@@ -240,7 +241,7 @@ def test_parse_demand_various_formats():
     assert clean == "implement user login"
 
     repo, clean = parse_demand("caching for git@github.com:owner/repo", None)
-    assert repo == "https://github.com/owner/repo.git"
+    assert repo == "git@github.com:owner/repo.git"
     assert clean == "caching"
 
     repo, clean = parse_demand("create a new endpoint on https://github.com/owner/repo.git for users", None)
@@ -250,6 +251,36 @@ def test_parse_demand_various_formats():
     repo, clean = parse_demand("https://github.com/owner/repo.git : do something", None)
     assert repo == "https://github.com/owner/repo.git"
     assert clean == "do something"
+
+
+@pytest.mark.anyio
+async def test_run_pipeline_ssh_no_token(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    
+    mock_context = MagicMock()
+    
+    mock_process = AsyncMock()
+    mock_process.returncode = 1  # exit early on clone fail
+    mock_process.communicate.return_value = (b"", b"dummy clone fail")
+    
+    from telegram_listener import run_pipeline
+    
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        await run_pipeline(mock_update, mock_context, "git@github.com:owner/repo.git", "test demand")
+        
+        # Verify it didn't fail on GITHUB_TOKEN check but proceeded to clone with SSH URL
+        mock_exec.assert_any_call(
+            "git", "clone", "git@github.com:owner/repo.git", "/workspace/project",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
 
 
 

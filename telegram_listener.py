@@ -17,24 +17,27 @@ def sanitize_environment() -> None:
 sanitize_environment()
 
 def normalize_repo_url(repo: str) -> str:
-    """Normalizes any repo format (HTTPS, SSH, shorthand) to the standard HTTPS format."""
+    """Normalizes any repo format, preserving SSH/HTTPS protocols, ending with .git."""
     repo = repo.strip()
-    # Remove .git suffix if present
-    if repo.lower().endswith(".git"):
-        repo = repo[:-4]
-        
-    # Check if it starts with HTTP/HTTPS URL
-    if repo.lower().startswith(("http://", "https://")):
-        return f"{repo}.git"
-        
+    
     # Check if it starts with SSH URL format
     # E.g. git@github.com:owner/repo or ssh://git@github.com/owner/repo
     ssh_prefix_match = re.match(r'^(?:ssh://)?git@github\.com[:/](.*)$', repo, re.IGNORECASE)
     if ssh_prefix_match:
         repo_path = ssh_prefix_match.group(1)
-        return f"https://github.com/{repo_path}.git"
+        if repo_path.lower().endswith(".git"):
+            repo_path = repo_path[:-4]
+        return f"git@github.com:{repo_path}.git"
+        
+    # Check if it starts with HTTP/HTTPS URL
+    if repo.lower().startswith(("http://", "https://")):
+        if repo.lower().endswith(".git"):
+            repo = repo[:-4]
+        return f"{repo}.git"
         
     # Shorthand (owner/repo)
+    if repo.lower().endswith(".git"):
+        repo = repo[:-4]
     return f"https://github.com/{repo}.git"
 
 def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -> tuple[str, str]:
@@ -393,9 +396,6 @@ def get_pr_url(output: str) -> str:
 async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_url: str, demand: str, is_resume: bool = False):
     project_dir = "/workspace/project"
     github_token = os.environ.get("GITHUB_TOKEN")
-    if not github_token:
-        await update.message.reply_text("❌ Error: GITHUB_TOKEN environment variable is not defined.")
-        return
 
     # Setup or load session data
     session_data = load_session()
@@ -442,7 +442,16 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             f"💡 Demand: `{demand}`"
         )
 
-    auth_repo_url = repo_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
+    # Check GITHUB_TOKEN requirement (only HTTPS clones require it)
+    if not github_token and repo_url and repo_url.startswith("https://github.com/"):
+        await update.message.reply_text("❌ Error: GITHUB_TOKEN environment variable is not defined and is required for HTTPS repository cloning.")
+        return
+
+    # Authenticate HTTPS repo URL if GITHUB_TOKEN is available
+    if github_token and repo_url:
+        auth_repo_url = repo_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
+    else:
+        auth_repo_url = repo_url
 
     # Repository setup
     try:
