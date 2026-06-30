@@ -3,6 +3,7 @@ import asyncio
 import html
 import re
 import subprocess
+import json
 from abc import ABC, abstractmethod
 from typing import Dict, List, Type
 from telegram import Update
@@ -37,6 +38,86 @@ def parse_demand(demand: str, default_repo: str = None) -> tuple[str, str]:
         return repo_url, demand
         
     return None, demand
+
+SESSION_FILE_PATH = "/root/.config/aegis-phalanx/session.json"
+
+def save_session(repo_url: str, demand: str, last_completed_step: str, steps_status: dict, git_branch: str, session_file_path: str = SESSION_FILE_PATH) -> None:
+    """Saves the current pipeline session metadata to a JSON file."""
+    try:
+        os.makedirs(os.path.dirname(session_file_path), exist_ok=True)
+        data = {
+            "repo_url": repo_url,
+            "demand": demand,
+            "last_completed_step": last_completed_step,
+            "steps_status": steps_status,
+            "git_branch": git_branch
+        }
+        with open(session_file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving session: {e}", flush=True)
+
+def load_session(session_file_path: str = SESSION_FILE_PATH) -> dict:
+    """Loads the pipeline session metadata from JSON file. Returns None if it doesn't exist."""
+    if not os.path.exists(session_file_path):
+        return None
+    try:
+        with open(session_file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading session: {e}", flush=True)
+        return None
+
+def clear_session(session_file_path: str = SESSION_FILE_PATH) -> None:
+    """Removes the persistent session file."""
+    if os.path.exists(session_file_path):
+        try:
+            os.remove(session_file_path)
+        except Exception as e:
+            print(f"Error clearing session: {e}", flush=True)
+
+async def classify_intent(message_text: str) -> str:
+    """Classifies user messages using Gemini 3.5 Flash via agy CLI, with keyword fallback."""
+    prompt = f"""Classify the user intent for a coding assistant bot.
+User message: "{message_text}"
+
+Intents:
+- RESUME: The user wants to continue, resume, retry, or finish the last run, or fix the error and try again.
+- QUERY_STATUS: The user is asking what was done, what is the status of the last task, or what the agent remembers.
+- NEW_DEMAND: The user is requesting a new software engineering task or feature.
+
+Respond with ONLY the classification label (RESUME, QUERY_STATUS, or NEW_DEMAND) in plain text, with no markdown, punctuation, or extra words.
+"""
+    cmd = [
+        "agy",
+        "--model", "Gemini 3.5 Flash (Low)",
+        "--dangerously-skip-permissions",
+        "--print-timeout", "1m",
+        "--print", prompt
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode == 0:
+            result = stdout.decode('utf-8').strip().upper()
+            for label in ["RESUME", "QUERY_STATUS", "NEW_DEMAND"]:
+                if label in result:
+                    return label
+    except Exception:
+        pass
+    
+    # Fallback to simple regex/keyword heuristics if agy call fails
+    cleaned = message_text.lower().strip()
+    if any(k in cleaned for k in ["continue", "resume", "continuar", "recomecar", "retry", "tentar de novo"]):
+        return "RESUME"
+    if any(k in cleaned for k in ["status", "memory", "last", "ultima", "o que foi feito", "memoria", "lembra"]):
+        return "QUERY_STATUS"
+        
+    return "NEW_DEMAND"
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -236,76 +317,138 @@ def get_pr_url(output: str) -> str:
         return match.group(1)
     return ""
 
-async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    if chat_id != ALLOWED_CHAT_ID:
-        return
-
-    raw_demand = update.message.text
-    
-    # 1. Parse repository and clean demand
-    default_repo = os.environ.get("DEFAULT_REPO")
-    repo_url, demand = parse_demand(raw_demand, default_repo)
-    
-    if not repo_url:
-        await update.message.reply_text(
-            "❌ Error: No repository specified. Please prefix your demand with your repository (e.g. `owner/repo: my demand`) or configure `DEFAULT_REPO` in .env."
-        )
-        return
-        
+async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_url: str, demand: str, is_resume: bool = False):
+    project_dir = "/workspace/project"
     github_token = os.environ.get("GITHUB_TOKEN")
     if not github_token:
         await update.message.reply_text("❌ Error: GITHUB_TOKEN environment variable is not defined.")
         return
 
-    # Embed token for HTTPS authentication to bypass SSH passphrase prompts
-    auth_repo_url = repo_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
-    project_dir = "/workspace/project"
-
-    await update.message.reply_text(
-        f"🚀 Starting Multi-Model TDD Pipeline\n"
-        f"📦 Repository: `{repo_url}`\n"
-        f"💡 Demand: `{demand}`"
-    )
-
-    try:
-        # Clean up existing workspace project folder
-        if os.path.exists(project_dir):
-            proc = await asyncio.create_subprocess_exec("rm", "-rf", project_dir)
-            await proc.wait()
-
-        # Clone repository
-        await update.message.reply_text("📥 Cloning repository...")
-        clone_proc = await asyncio.create_subprocess_exec(
-            "git", "clone", auth_repo_url, project_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout_c, stderr_c = await clone_proc.communicate()
-        
-        if clone_proc.returncode != 0:
-            err = stderr_c.decode('utf-8', errors='replace')[:800]
-            await update.message.reply_text(f"❌ Failed to clone repository.\nStderr:\n{err}")
+    # Setup or load session data
+    session_data = load_session()
+    steps_status = {}
+    git_branch = ""
+    
+    if is_resume:
+        if not session_data:
+            await update.message.reply_text("❌ Error: No previous session found to resume.")
             return
+        repo_url = session_data["repo_url"]
+        demand = session_data["demand"]
+        git_branch = session_data["git_branch"]
+        steps_status = session_data.get("steps_status", {})
+        
+        # Determine starting step index
+        start_index = 0
+        for i, step in enumerate(PIPELINE_CONFIG):
+            step_name = step["step_name"]
+            if steps_status.get(step_name) != "success":
+                start_index = i
+                break
+        else:
+            await update.message.reply_text("✅ All steps in the last pipeline were already completed successfully!")
+            return
+            
+        await update.message.reply_text(
+            f"🔄 Resuming pipeline for:\n"
+            f"📦 Repository: `{repo_url}`\n"
+            f"💡 Demand: `{demand}`\n"
+            f"⏳ Resuming from step: `{PIPELINE_CONFIG[start_index]['step_name']}`"
+        )
+    else:
+        # New demand: clean up previous session if any
+        clear_session()
+        start_index = 0
+        # Determine git branch name based on demand description
+        clean_name = re.sub(r'[^a-zA-Z0-9]', '-', demand.lower())[:30].strip('-')
+        git_branch = f"feature/{clean_name}"
+        
+        await update.message.reply_text(
+            f"🚀 Starting Multi-Model TDD Pipeline\n"
+            f"📦 Repository: `{repo_url}`\n"
+            f"💡 Demand: `{demand}`"
+        )
 
-        # Setup local git config so commits don't fail inside the container
-        for key, val in [("user.name", "Aegis Agent"), ("user.email", "agent@aegis-phalanx.local")]:
-            proc = await asyncio.create_subprocess_exec("git", "config", key, val, cwd=project_dir)
+    auth_repo_url = repo_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
+
+    # Repository setup
+    try:
+        # If it is a new run, or the project folder is missing, we clone
+        if not is_resume or not os.path.exists(project_dir):
+            if os.path.exists(project_dir):
+                proc = await asyncio.create_subprocess_exec("rm", "-rf", project_dir)
+                await proc.wait()
+
+            await update.message.reply_text("📥 Cloning repository...")
+            clone_proc = await asyncio.create_subprocess_exec(
+                "git", "clone", auth_repo_url, project_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout_c, stderr_c = await clone_proc.communicate()
+            
+            if clone_proc.returncode != 0:
+                err = stderr_c.decode('utf-8', errors='replace')[:800]
+                await update.message.reply_text(f"❌ Failed to clone repository.\nStderr:\n{err}")
+                return
+
+            for key, val in [("user.name", "Aegis Agent"), ("user.email", "agent@aegis-phalanx.local")]:
+                proc = await asyncio.create_subprocess_exec("git", "config", key, val, cwd=project_dir)
+                await proc.wait()
+
+        # Handle branch checkout for resume or new demand
+        if is_resume:
+            # Check if the branch exists locally
+            branch_exists_local = False
+            proc = await asyncio.create_subprocess_exec(
+                "git", "show-ref", "--verify", f"refs/heads/{git_branch}",
+                cwd=project_dir
+            )
+            await proc.wait()
+            if proc.returncode == 0:
+                branch_exists_local = True
+
+            if branch_exists_local:
+                proc = await asyncio.create_subprocess_exec("git", "checkout", git_branch, cwd=project_dir)
+                await proc.wait()
+            else:
+                # Try checkout from origin
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "checkout", "-b", git_branch, f"origin/{git_branch}",
+                    cwd=project_dir
+                )
+                await proc.wait()
+                if proc.returncode != 0:
+                    await update.message.reply_text(
+                        f"⚠️ Warning: The local branch `{git_branch}` and its commits were lost because the container was rebuilt or the directory was cleaned.\n"
+                        "Cannot resume. Restarting the pipeline from the beginning..."
+                    )
+                    start_index = 0
+                    is_resume = False
+                    # Create new branch
+                    proc = await asyncio.create_subprocess_exec("git", "checkout", "-b", git_branch, cwd=project_dir)
+                    await proc.wait()
+        else:
+            # Create new branch
+            proc = await asyncio.create_subprocess_exec("git", "checkout", "-b", git_branch, cwd=project_dir)
             await proc.wait()
 
     except Exception as e:
         await update.message.reply_text(f"❌ Initialization error: {str(e)}")
         return
 
-    for step in PIPELINE_CONFIG:
+    # Execute step loop
+    for idx in range(start_index, len(PIPELINE_CONFIG)):
+        step = PIPELINE_CONFIG[idx]
+        step_name = step["step_name"]
+        
         await update.message.reply_text(
-            f"⏳ Executing: {step['step_name']}\n🔧 CLI: `{step['tool']}` | Model: `{step['model']}` (Thinking: {step['reasoning_budget']})"
+            f"⏳ Executing: {step_name}\n🔧 CLI: `{step['tool']}` | Model: `{step['model']}` (Thinking: {step['reasoning_budget']})"
         )
         
         prompt_content = step['prompt'].format(demand=demand)
         
         try:
-            # Get the abstracted concrete implementation (DIP / OCP)
             agent_cli = AgentRegistry.get_agent(step['tool'])
             command = agent_cli.build_command(
                 prompt=prompt_content,
@@ -316,7 +459,11 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
             returncode, stdout_str, stderr_str = await run_command_and_stream(command, cwd=project_dir)
             
             if returncode != 0:
-                error_msg = f"⚠️ Failure in step {step['step_name']}:\n\n"
+                # Mark step as failed
+                steps_status[step_name] = "failed"
+                save_session(repo_url, demand, step_name if idx == 0 else PIPELINE_CONFIG[idx-1]["step_name"], steps_status, git_branch)
+                
+                error_msg = f"⚠️ Failure in step {step_name}:\n\n"
                 if stderr_str.strip():
                     error_msg += f"Stderr:\n{stderr_str[:800]}\n\n"
                 if stdout_str.strip():
@@ -324,13 +471,17 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(error_msg)
                 return
 
+            # Mark step as successful
+            steps_status[step_name] = "success"
+            save_session(repo_url, demand, step_name, steps_status, git_branch)
+
             # Generate smart summary of key metrics
             pytest_sum = get_pytest_summary(stdout_str)
             git_changes = get_git_changes()
             pr_url = get_pr_url(stdout_str)
             
             summary_parts = []
-            summary_parts.append(f"✅ <b>{step['step_name']} completed successfully!</b>")
+            summary_parts.append(f"✅ <b>{step_name} completed successfully!</b>")
             
             if git_changes:
                 summary_parts.append(f"<b>Files changed:</b>\n{git_changes}")
@@ -354,10 +505,81 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
                 
         except Exception as e:
-            await update.message.reply_text(f"❌ System error in step {step['step_name']}: {str(e)}")
+            steps_status[step_name] = "failed"
+            save_session(repo_url, demand, step_name if idx == 0 else PIPELINE_CONFIG[idx-1]["step_name"], steps_status, git_branch)
+            await update.message.reply_text(f"❌ System error in step {step_name}: {str(e)}")
             return
 
     await update.message.reply_text("✅ Multi-Model Pipeline completed successfully! PR opened on repository.")
+    clear_session()
+
+async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id != ALLOWED_CHAT_ID:
+        return
+
+    raw_demand = update.message.text
+    
+    # Classify intent using Gemini CLI or keyword fallbacks
+    intent = await classify_intent(raw_demand)
+    
+    if intent == "RESUME":
+        await run_pipeline(update, context, None, None, is_resume=True)
+    elif intent == "QUERY_STATUS":
+        await send_status(update)
+    else:
+        # NEW_DEMAND
+        default_repo = os.environ.get("DEFAULT_REPO")
+        repo_url, demand = parse_demand(raw_demand, default_repo)
+        
+        if not repo_url:
+            await update.message.reply_text(
+                "❌ Error: No repository specified. Please prefix your demand with your repository (e.g. `owner/repo: my demand`) or configure `DEFAULT_REPO` in .env."
+            )
+            return
+            
+        await run_pipeline(update, context, repo_url, demand, is_resume=False)
+
+async def handle_continue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id != ALLOWED_CHAT_ID:
+        return
+    await run_pipeline(update, context, None, None, is_resume=True)
+
+async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id != ALLOWED_CHAT_ID:
+        return
+    await send_status(update)
+
+async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id != ALLOWED_CHAT_ID:
+        return
+    clear_session()
+    await update.message.reply_text("🧹 Session memory cleared successfully.")
+
+async def send_status(update: Update):
+    session = load_session()
+    if not session:
+        await update.message.reply_text("ℹ️ No active session in memory.")
+        return
+        
+    status_msg = (
+        f"🧠 <b>Aegis Session Memory:</b>\n\n"
+        f"📦 <b>Repository:</b> <code>{session['repo_url']}</code>\n"
+        f"💡 <b>Demand:</b> <code>{session['demand']}</code>\n"
+        f"🌿 <b>Branch:</b> <code>{session['git_branch']}</code>\n"
+        f"🏁 <b>Last Completed:</b> <code>{session['last_completed_step']}</code>\n\n"
+        f"📊 <b>Step Statuses:</b>\n"
+    )
+    for step in PIPELINE_CONFIG:
+        step_name = step["step_name"]
+        status = session.get("steps_status", {}).get(step_name, "pending")
+        icon = "✅" if status == "success" else "❌" if status == "failed" else "⏳"
+        status_msg += f"{icon} {step_name}: <code>{status}</code>\n"
+        
+    await update.message.reply_text(status_msg, parse_mode="HTML")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) == ALLOWED_CHAT_ID:
@@ -371,5 +593,8 @@ if __name__ == '__main__':
         
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("continue", handle_continue))
+    app.add_handler(CommandHandler("status", handle_status))
+    app.add_handler(CommandHandler("clear", handle_clear))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_demand))
     app.run_polling()
