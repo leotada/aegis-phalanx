@@ -386,11 +386,19 @@ def get_pytest_summary(output: str) -> str:
         return match2.group(1).strip()
     return ""
 
-def get_pr_url(output: str) -> str:
-    # Match pull request creation URLs in stdout
-    match = re.search(r'(https://github\.com/[^\s]+/pull/\d+)', output)
-    if match:
-        return match.group(1)
+def get_pr_url() -> str:
+    """Uses the GitHub CLI to get the PR URL for the current branch, if one exists."""
+    try:
+        result = subprocess.run(
+            ["podman", "compose", "exec", "-T", "agent", "bash", "-c", "cd /workspace/project && gh pr view --json url -q .url"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
     return ""
 
 async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_url: str, demand: str, is_resume: bool = False):
@@ -560,7 +568,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             # Generate smart summary of key metrics
             pytest_sum = get_pytest_summary(stdout_str)
             git_changes = get_git_changes()
-            pr_url = get_pr_url(stdout_str)
+            pr_url = get_pr_url()
             
             summary_parts = []
             summary_parts.append(f"✅ <b>{step_name} completed successfully!</b>")
@@ -577,8 +585,10 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             # Fallback if no specific info was parsed
             if not pytest_sum and not git_changes and not pr_url:
                 stdout_lines = [line.strip() for line in stdout_str.splitlines() if line.strip()]
-                last_lines = "\n".join(stdout_lines[-5:]) if stdout_lines else "No console output."
-                summary_parts.append(f"<b>Output Tail:</b>\n<pre>{html.escape(last_lines)}</pre>")
+                last_lines = "\n".join(stdout_lines[-7:]) if stdout_lines else "No console output."
+                last_lines_escaped = html.escape(last_lines)
+                last_lines_formatted = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', last_lines_escaped)
+                summary_parts.append(f"<b>Output Tail:</b>\n{last_lines_formatted}")
                 
             await update.message.reply_text(
                 "\n\n".join(summary_parts),
@@ -592,7 +602,15 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             await update.message.reply_text(f"❌ System error in step {step_name}: {str(e)}")
             return
 
-    await update.message.reply_text("✅ Multi-Model Pipeline completed successfully! PR opened on repository.")
+    final_pr_url = get_pr_url()
+    if final_pr_url:
+        await update.message.reply_text(
+            f"✅ <b>Multi-Model Pipeline completed successfully!</b>\n\n🔗 <b>PR Opened:</b> <a href=\"{final_pr_url}\">{final_pr_url}</a>",
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+    else:
+        await update.message.reply_text("✅ Multi-Model Pipeline completed successfully! PR opened on repository.")
     clear_session()
 
 async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
