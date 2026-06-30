@@ -6,8 +6,8 @@ import subprocess
 import json
 from abc import ABC, abstractmethod
 from typing import Dict, List, Type
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, BotCommand
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, Application
 
 def sanitize_environment() -> None:
     """Removes GITHUB_TOKEN if it is still set to the default placeholder."""
@@ -614,16 +614,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) == ALLOWED_CHAT_ID:
         await update.message.reply_text("🤖 Multi-Agent System Online. Awaiting requirements...")
 
+async def post_init(application: Application) -> None:
+    """Registers slash commands in the Telegram client UI."""
+    await application.bot.set_my_commands([
+        BotCommand("start", "Start the bot and get instructions"),
+        BotCommand("continue", "Resume the last paused/failed pipeline step"),
+        BotCommand("status", "Query current pipeline status and memory"),
+        BotCommand("clear", "Clear active session memory")
+    ])
+
+def build_application() -> Application:
+    """Builds and returns the Application instance with registered handlers and post_init."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise ValueError("TELEGRAM_BOT_TOKEN is not defined in environment variables.")
+        
+    app = ApplicationBuilder().token(token).post_init(post_init).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("continue", handle_continue))
+    app.add_handler(CommandHandler("status", handle_status))
+    app.add_handler(CommandHandler("clear", handle_clear))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_demand))
+    return app
+
 if __name__ == '__main__':
     # Verify that required tokens are set in environment
     if not TOKEN or not ALLOWED_CHAT_ID:
         print("Error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not defined in environment variables.")
         exit(1)
         
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("continue", handle_continue))
-    app.add_handler(CommandHandler("status", handle_status))
-    app.add_handler(CommandHandler("clear", handle_clear))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_demand))
+    app = build_application()
     app.run_polling()

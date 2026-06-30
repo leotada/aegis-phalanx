@@ -135,4 +135,46 @@ async def test_classify_intent_via_agy_failure_fallback():
         assert res == "NEW_DEMAND"
 
 
+@pytest.mark.anyio
+async def test_post_init_registers_bot_commands():
+    from telegram_listener import post_init
+    from telegram import BotCommand
+    from unittest.mock import AsyncMock, MagicMock
+    
+    mock_app = MagicMock()
+    mock_app.bot = MagicMock()
+    mock_app.bot.set_my_commands = AsyncMock()
+    
+    await post_init(mock_app)
+    
+    mock_app.bot.set_my_commands.assert_called_once()
+    args, kwargs = mock_app.bot.set_my_commands.call_args
+    commands = args[0]
+    
+    expected_commands = {
+        "start": "Start the bot and get instructions",
+        "continue": "Resume the last paused/failed pipeline step",
+        "status": "Query current pipeline status and memory",
+        "clear": "Clear active session memory"
+    }
+    
+    assert len(commands) == len(expected_commands)
+    for cmd in commands:
+        assert isinstance(cmd, BotCommand)
+        assert cmd.command in expected_commands
+        assert cmd.description == expected_commands[cmd.command]
+
+
+def test_build_application():
+    from telegram_listener import build_application
+    import os
+    os.environ["TELEGRAM_BOT_TOKEN"] = "12345:dummy_token"
+    try:
+        app = build_application()
+        assert app is not None
+        assert app.post_init is not None
+    finally:
+        del os.environ["TELEGRAM_BOT_TOKEN"]
+
+
 
