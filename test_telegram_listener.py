@@ -1,8 +1,10 @@
 import os
 import pytest
 import asyncio
+import importlib
+from agents import AgentRegistry, AntigravityAgentCLI, CursorAgentCLI
+from agents.pipeline import PIPELINE_CONFIG, resolve_pipeline_config
 from telegram_listener import (
-    AntigravityAgentCLI,
     sanitize_environment,
     parse_demand,
     save_session,
@@ -11,6 +13,8 @@ from telegram_listener import (
     delete_session,
     classify_intent,
     extract_owner_repo,
+    parse_model_quota,
+    format_model_quota_section,
 )
 
 def test_antigravity_cli_timeout_argument(monkeypatch):
@@ -22,18 +26,20 @@ def test_antigravity_cli_timeout_argument(monkeypatch):
 
     # Verify we can override step timeout via env variable
     monkeypatch.setenv("AGENT_STEP_TIMEOUT", "10m")
-    import importlib
-    import telegram_listener
-    importlib.reload(telegram_listener)
-    
+    import agents.config
+    import agents.adapters.agy
+    importlib.reload(agents.config)
+    importlib.reload(agents.adapters.agy)
+
     try:
-        cli2 = telegram_listener.AntigravityAgentCLI()
+        cli2 = agents.adapters.agy.AntigravityAgentCLI()
         cmd2 = cli2.build_command("Test prompt", "gemini-3.5-flash", "low")
         assert "--print-timeout" in cmd2
         assert "10m" in cmd2
     finally:
         monkeypatch.delenv("AGENT_STEP_TIMEOUT", raising=False)
-        importlib.reload(telegram_listener)
+        importlib.reload(agents.config)
+        importlib.reload(agents.adapters.agy)
 
 
 def test_antigravity_cli_per_step_timeout_override():
@@ -43,6 +49,48 @@ def test_antigravity_cli_per_step_timeout_override():
     assert "--print-timeout" in cmd
     idx = cmd.index("--print-timeout")
     assert cmd[idx + 1] == "20m"
+
+
+def test_cursor_cli_build_command():
+    cli = CursorAgentCLI()
+    cmd = cli.build_command("Test prompt", "gemini-3.1-pro", "high", timeout="15m")
+
+    assert cmd[0] == "agent"
+    assert "-p" in cmd
+    assert cmd[cmd.index("-p") + 1] == "Test prompt"
+    assert "--model" in cmd
+    assert cmd[cmd.index("--model") + 1] == "auto"
+    assert "--trust" in cmd
+    assert "--force" in cmd
+    assert "--api-key" not in cmd
+
+
+def test_cursor_cli_always_uses_auto_model():
+    cli = CursorAgentCLI()
+    cmd = cli.build_command("Another prompt", "gemini-3.5-flash", "low")
+
+    assert cmd[cmd.index("--model") + 1] == "auto"
+
+
+def test_cursor_auth_api_key_fallback(monkeypatch):
+    cli = CursorAgentCLI()
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor_test_key")
+    cmd = cli.build_command("Prompt", "auto", "medium")
+
+    assert "--api-key" in cmd
+    assert cmd[cmd.index("--api-key") + 1] == "cursor_test_key"
+
+
+def test_agent_registry_has_cursor():
+    agent = AgentRegistry.get_agent("cursor")
+    assert isinstance(agent, CursorAgentCLI)
+
+
+def test_pipeline_tool_env_override(monkeypatch):
+    monkeypatch.setenv("AGENT_TOOL", "cursor")
+    resolved = resolve_pipeline_config()
+    assert len(resolved) == len(PIPELINE_CONFIG)
+    assert all(step["tool"] == "cursor" for step in resolved)
 
 
 def test_extract_owner_repo_ssh():
@@ -147,11 +195,13 @@ async def test_classify_intent_via_agy_success():
     mock_process = AsyncMock()
     mock_process.returncode = 0
     mock_process.communicate.return_value = (b"RESUME\n", b"")
-    
-    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+
+    with patch("telegram_listener.DEFAULT_AGENT_TOOL", "agy"), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
         res = await classify_intent("some message")
         assert res == "RESUME"
         mock_exec.assert_called_once()
+        assert mock_exec.call_args[0][0] == "agy"
         assert "Gemini 3.5 Flash (Low)" in mock_exec.call_args[0]
 
 @pytest.mark.anyio
@@ -361,7 +411,7 @@ async def test_pipeline_reports_honestly_when_no_pr_url(monkeypatch):
 
 def test_pipeline_config_steps():
     """Verify that PIPELINE_CONFIG has the split Architect steps, modified Code Reviewer step, and Refactoring Developer step."""
-    from telegram_listener import PIPELINE_CONFIG
+    from agents.pipeline import PIPELINE_CONFIG
     
     # Verify we have 6 steps now
     assert len(PIPELINE_CONFIG) == 6
@@ -458,6 +508,67 @@ async def test_pipeline_orchestrates_pr_creation_on_fallback(monkeypatch):
     assert "https://github.com/owner/repo/pull/42" in final_call
 
 
+SAMPLE_QUOTA_OUTPUT = """
+GEMINI MODELS
+  Models within this group: Gemini Flash, Gemini Pro
+
+  Weekly Limit
+[████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░] 47.65%
+    48% remaining · Refreshes in 92h 11m
+
+  Five Hour Limit
+[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0.00%
+    Refreshes in 1h 49m
+
+CLAUDE AND GPT MODELS
+  Models within this group: Claude Opus, Claude Sonnet, GPT-OSS
+
+  Weekly Limit
+    [█████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░] 50.21%
+    50% remaining · Refreshes in 137h 37m
+
+  Five Hour Limit
+    [███████████████████████████████████░░░░░░░░░░░░░░░] 70.23%
+    70% remaining · Refreshes in 1h 3m
+"""
+
+
+def test_parse_model_quota_handles_zero_remaining_without_remaining_label():
+    """When quota is exhausted, agy shows only the bar (0.00%) without a 'remaining' line."""
+    output = """
+GEMINI MODELS
+  Five Hour Limit
+[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 0.00%
+    Refreshes in 1h 49m
+"""
+    quota = parse_model_quota(output)
+    assert quota["GEMINI MODELS"]["five_hour"]["remaining"] == 0.0
+    assert quota["GEMINI MODELS"]["five_hour"]["usage"] == 100.0
+    assert quota["GEMINI MODELS"]["five_hour"]["refresh"] == "1h 49m"
+
+    rendered = format_model_quota_section(quota)
+    assert "Gemini Five-Hour: <code>100%</code> used" in rendered
+
+
+def test_parse_model_quota_extracts_usage_percentages():
+    quota = parse_model_quota(SAMPLE_QUOTA_OUTPUT)
+    assert quota["GEMINI MODELS"]["weekly"]["remaining"] == 48.0
+    assert quota["GEMINI MODELS"]["weekly"]["usage"] == 52.0
+    assert quota["GEMINI MODELS"]["weekly"]["refresh"] == "92h 11m"
+    assert quota["GEMINI MODELS"]["five_hour"]["remaining"] == 0.0
+    assert quota["GEMINI MODELS"]["five_hour"]["usage"] == 100.0
+    assert quota["CLAUDE AND GPT MODELS"]["five_hour"]["usage"] == 30.0
+
+
+def test_format_model_quota_section_renders_html():
+    quota = parse_model_quota(SAMPLE_QUOTA_OUTPUT)
+    rendered = format_model_quota_section(quota)
+    assert "Model Quota Usage" in rendered
+    assert "Gemini Five-Hour: <code>100%</code> used" in rendered
+    assert "Gemini Weekly: <code>52%</code> used" in rendered
+    assert "92h 11m" in rendered
+
+
 @pytest.mark.anyio
 async def test_send_status_no_session():
     import telegram_listener
@@ -508,7 +619,8 @@ async def test_send_status_complete_session():
         }
     }
     
-    with patch("telegram_listener.load_session", return_value=dummy_session):
+    with patch("telegram_listener.load_session", return_value=dummy_session), \
+         patch("telegram_listener.get_model_quota_summary", return_value="📉 <b>Model Quota Usage:</b>\n  • Gemini Five-Hour: <code>100%</code> used\n\n"):
         await telegram_listener.send_status(mock_update)
         
     mock_update.message.reply_text.assert_called_once()
@@ -519,6 +631,8 @@ async def test_send_status_complete_session():
     assert "do something &amp; test" in status_msg
     assert "feature/do-something" in status_msg
     assert "Architect (Planning - PLAN)" in status_msg
+    assert "Model Quota Usage" in status_msg
+    assert "100%" in status_msg
 
 
 @pytest.mark.anyio

@@ -7,12 +7,15 @@ RUN dnf update -y && dnf install -y \
     postgresql-devel \
     && dnf clean all
 
-# Install Claude Code CLI (Anthropic Official CLI)
-RUN npm install -g @anthropic-ai/claude-code
-
-# Install Antigravity CLI (Google Official CLI)
-RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
 ENV PATH="/root/.local/bin:/usr/local/bin:$PATH"
+
+# Install only the agent CLI selected at build time (AGENT_TOOL in .env)
+ARG AGENT_TOOL=agy
+ENV AGENT_TOOL=${AGENT_TOOL}
+
+COPY agents/tool_specs.py scripts/install_agent_tool.py /tmp/agent-install/
+RUN AGENT_TOOL=${AGENT_TOOL} python3 /tmp/agent-install/install_agent_tool.py \
+    && rm -rf /tmp/agent-install
 
 # Install Telegram bot libraries and testing frameworks
 RUN pip install --no-cache-dir \
@@ -21,5 +24,6 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /workspace
 
-# Copy orchestrator and config files into the image
+# Copy orchestrator, agent package, and config files into the image
 COPY telegram_listener.py .agyrules system_prompt.txt /workspace/
+COPY agents/ /workspace/agents/

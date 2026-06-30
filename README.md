@@ -28,9 +28,42 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
 ## Installation & Setup
 
 ### 1. Configure local sessions for official CLIs
-Before running the container, make sure you have logged in to the CLIs on your host machine so the credentials can be mapped properly:
-- For Claude Code: `claude auth login` (stores session in `~/.config/claude`)
-- For Antigravity: `agy login` or equivalent configuration (stores session in `~/.config/antigravity`)
+Before running the container, log in to the CLI matching `AGENT_TOOL` in `.env` (default `agy`):
+
+| `AGENT_TOOL` | Host login | Session paths mounted into the container |
+|--------------|------------|------------------------------------------|
+| `agy` | `agy login` | `~/.config/antigravity`, `~/.gemini/*`, `~/.antigravity` |
+| `claude` | `claude auth login` | `~/.config/claude` |
+| `cursor` | `agent login` | `~/.cursor`, `~/.config/Cursor` |
+| `aider` | API keys in `.env` (no session mount) | — |
+
+Set `AGENT_TOOL` in `.env`, then run `make build` or `make up`. The Makefile renders `compose.tool.yml` and passes `AGENT_TOOL` as a build arg so only that CLI is installed in the image.
+
+#### Using Cursor CLI (`AGENT_TOOL=cursor`)
+
+1. **Install and log in on the host** (credentials are mounted into the container):
+   ```bash
+   curl -fsSL https://cursor.com/install | bash
+   agent login
+   ```
+   Verify with `agent --version`. Session files under `~/.cursor` and `~/.config/Cursor` must exist before starting the stack.
+
+2. **Configure `.env`**:
+   ```env
+   AGENT_TOOL=cursor
+   ```
+   Optional fallback when session mounts are unavailable (CI/headless):
+   ```env
+   CURSOR_API_KEY=your_key_from_cursor_dashboard
+   ```
+   Create a key at [cursor.com/dashboard/integrations](https://cursor.com/dashboard/integrations).
+
+3. **Build and start** (rebuild required when switching tools). `make build` reads `AGENT_TOOL` from `.env` for both the image and `compose.tool.yml` volume mounts:
+   ```bash
+   make build
+   ```
+
+The pipeline invokes `agent -p <prompt> --model auto --trust --force`. Model and reasoning fields in the pipeline config are ignored for Cursor; the CLI always runs in `auto` mode.
 
 ### 2. Configure SSH Key Authentication (Optional)
 If you wish to use SSH authentication instead of `GITHUB_TOKEN`:
@@ -52,14 +85,21 @@ GITHUB_TOKEN=your_github_token_here  # Leave blank if cloning via SSH
 TELEGRAM_BOT_TOKEN=12345:AABBBCCC
 TELEGRAM_CHAT_ID=your_chat_id_here
 DEFAULT_REPO=owner/repo  # Optional default repository
+AGENT_TOOL=cursor        # agy | cursor | claude | aider (rebuild with make build after changing)
 ```
 
 ### 3. Spin Up the Containers
-Build and run the stack using Podman:
+Build and run the stack using the Makefile (reads `AGENT_TOOL` from `.env`):
 ```bash
-podman compose --env-file .env up -d --build
+make build
 ```
-This command builds the Fedora image with the required CLIs and starts the Telegram listener.
+This renders tool-specific volume mounts and builds the image with only the selected CLI installed.
+
+You can also run directly:
+```bash
+python3 scripts/render_compose_overlay.py
+podman compose --env-file .env -f compose.yml -f compose.tool.yml up -d --build
+```
 
 ### 4. Activate the Bot
 Go to your Telegram chat with the bot and send:

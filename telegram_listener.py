@@ -4,10 +4,19 @@ import html
 import re
 import subprocess
 import json
-from abc import ABC, abstractmethod
-from typing import Dict, List, Type
+import select
+import struct
+import fcntl
+import termios
+import pty
+import time
+from typing import Dict, List
 from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, Application
+
+from agents import AgentRegistry, DEFAULT_AGENT_TOOL, resolve_pipeline_config
+from agents.config import AGENT_INTENT_TIMEOUT, AGENT_STEP_TIMEOUT
+from agents.tool_specs import get_tool_spec
 
 def sanitize_environment() -> None:
     """Removes GITHUB_TOKEN if it is set to the default placeholder, empty, or whitespace only."""
@@ -120,8 +129,8 @@ def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -
     return None, demand
 
 SESSION_FILE_PATH = "/root/.config/aegis-phalanx/session.json"
-AGENT_STEP_TIMEOUT = os.environ.get("AGENT_STEP_TIMEOUT", "5m")
-AGENT_INTENT_TIMEOUT = os.environ.get("AGENT_INTENT_TIMEOUT", "15s")
+AGY_SCRATCH_DIR = "/root/.gemini/antigravity-cli/scratch"
+AGY_QUOTA_TIMEOUT = int(os.environ.get("AGY_QUOTA_TIMEOUT", "45"))
 ACTIVE_TASKS = {}
 
 
@@ -178,7 +187,7 @@ def delete_session(session_file_path: str = SESSION_FILE_PATH) -> None:
             print(f"Error deleting session file: {e}", flush=True)
 
 async def classify_intent(message_text: str) -> str:
-    """Classifies user messages using Gemini 3.5 Flash via agy CLI, with keyword fallback."""
+    """Classifies user messages using the active agent CLI, with keyword fallback."""
     prompt = f"""Classify the user intent for a coding assistant bot.
 User message: "{message_text}"
 
@@ -189,18 +198,18 @@ Intents:
 
 Respond with ONLY the classification label (RESUME, QUERY_STATUS, or NEW_DEMAND) in plain text, with no markdown, punctuation, or extra words.
 """
-    cmd = [
-        "agy",
-        "--model", "Gemini 3.5 Flash (Low)",
-        "--dangerously-skip-permissions",
-        "--print-timeout", AGENT_INTENT_TIMEOUT,
-        "--print", prompt
-    ]
     try:
+        agent_cli = AgentRegistry.get_agent(DEFAULT_AGENT_TOOL)
+        cmd = agent_cli.build_command(
+            prompt,
+            "gemini-3.5-flash",
+            "low",
+            timeout=AGENT_INTENT_TIMEOUT,
+        )
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await process.communicate()
         if process.returncode == 0:
@@ -210,8 +219,8 @@ Respond with ONLY the classification label (RESUME, QUERY_STATUS, or NEW_DEMAND)
                     return label
     except Exception:
         pass
-    
-    # Fallback to simple regex/keyword heuristics if agy call fails
+
+    # Fallback to simple regex/keyword heuristics if the agent call fails
     cleaned = message_text.lower().strip()
     if any(k in cleaned for k in ["continue", "resume", "continuar", "recomecar", "retry", "tentar de novo"]):
         return "RESUME"
@@ -223,151 +232,6 @@ Respond with ONLY the classification label (RESUME, QUERY_STATUS, or NEW_DEMAND)
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 ALLOWED_CHAT_ID = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
-
-# ==========================================
-# SOLID: Abstractions and Contracts (DIP)
-# ==========================================
-
-class AgentCLI(ABC):
-    """
-    Common abstraction for all AI Agent CLIs (Single Responsibility Principle).
-    """
-    @abstractmethod
-    def build_command(self, prompt: str, model: str, reasoning_budget: str, timeout: str = None) -> List[str]:
-        """Generates the terminal argument list to run the tool."""
-        pass
-
-
-# ==========================================
-# SOLID: Concrete Implementations (OCP / LSP)
-# ==========================================
-
-class AntigravityAgentCLI(AgentCLI):
-    """Adapter for the official Antigravity CLI (Google)."""
-    def build_command(self, prompt: str, model: str, reasoning_budget: str, timeout: str = None) -> List[str]:
-        # Map slugs to the exact names displayed in `agy models`
-        model_map = {
-            "gemini-3.1-pro": "Gemini 3.1 Pro",
-            "gemini-3.5-flash": "Gemini 3.5 Flash"
-        }
-        
-        base_name = model_map.get(model.lower(), model)
-        budget = reasoning_budget.capitalize() if reasoning_budget else "Medium"
-        full_model_name = f"{base_name} ({budget})"
-        effective_timeout = timeout if timeout else AGENT_STEP_TIMEOUT
-        
-        return [
-            "agy",
-            "--model", full_model_name,
-            "--dangerously-skip-permissions",
-            "--print-timeout", effective_timeout,
-            "--print", prompt
-        ]
-
-
-class ClaudeCodeAgentCLI(AgentCLI):
-    """Adapter for the official Claude Code CLI (Anthropic)."""
-    def build_command(self, prompt: str, model: str, reasoning_budget: str, timeout: str = None) -> List[str]:
-        return [
-            "claude",
-            "-p", prompt,
-            "-y"  # Non-interactive mode with auto-approval
-        ]
-
-
-class AiderAgentCLI(AgentCLI):
-    """Optional adapter for Aider (in case you want to use it in the future)."""
-    def build_command(self, prompt: str, model: str, reasoning_budget: str, timeout: str = None) -> List[str]:
-        return [
-            "aider",
-            "--model", model,
-            "--message", prompt,
-            "--yes",
-            "--no-auto-commits"
-        ]
-
-
-# ==========================================
-# SOLID: Factory and Modular Registry (OCP / SRP)
-# ==========================================
-
-class AgentRegistry:
-    """
-    Extensible factory for resolving agent instances without direct coupling.
-    """
-    _registry: Dict[str, Type[AgentCLI]] = {}
-
-    @classmethod
-    def register(cls, name: str, cli_class: Type[AgentCLI]) -> None:
-        cls._registry[name] = cli_class
-
-    @classmethod
-    def get_agent(cls, name: str) -> AgentCLI:
-        cli_class = cls._registry.get(name)
-        if not cli_class:
-            raise ValueError(f"Agent tool '{name}' is not registered.")
-        return cli_class()
-
-# Registering adapters in the system
-AgentRegistry.register("agy", AntigravityAgentCLI)
-AgentRegistry.register("claude", ClaudeCodeAgentCLI)
-AgentRegistry.register("aider", AiderAgentCLI)
-
-
-# ==========================================
-# Pipeline Orchestrator (Controller)
-# ==========================================
-
-# Declarative and mutable pipeline configuration
-PIPELINE_CONFIG = [
-    {
-        "step_name": "Architect (Planning - PLAN)",
-        "tool": "agy",
-        "model": "gemini-3.1-pro",
-        "reasoning_budget": "high",
-        "timeout": "5m",
-        "prompt": "Create a new git branch for the feature (switch/create if needed). Read this requirement: '{demand}'. Act as a Software Architect. Write a detailed plan containing all the business context, business rules, and design choices. The plan must contain two separate sections: 1) 'Test Specification Plan' detailing the test cases to be written, expected inputs/outputs, and edge cases for the Test Developer, and 2) 'Implementation Plan' describing the architectural design, file modifications, and guidelines for the Developer. Write this detailed plan to a file named `architect_plan.md` in the root of the repository. Do NOT write any tests or production code yet."
-    },
-    {
-        "step_name": "Test Developer (Testing - RED)",
-        "tool": "agy",
-        "model": "gemini-3.5-flash",
-        "reasoning_budget": "medium",
-        "timeout": "10m",
-        "prompt": "Read the `architect_plan.md` file created by the Architect in the root of the repository. Act as a Test Developer. Strictly follow the 'Test Specification Plan' section to write and implement all the specified test cases. Run the tests via CLI and prove they fail (TDD RED Phase). Do NOT write any production code. Do NOT delete `architect_plan.md` as it is needed by the Developer in the next step."
-    },
-    {
-        "step_name": "Developer (Implementation - GREEN)",
-        "tool": "agy",
-        "model": "gemini-3.5-flash",
-        "reasoning_budget": "medium",
-        "timeout": "10m",
-        "prompt": "Read the newly created tests that are currently failing and the `architect_plan.md` file in the root of the repository. Act as a Developer. Strictly follow the 'Implementation Plan' section of `architect_plan.md` to write the minimum and strictly necessary production code to make the tests pass (GREEN Phase). Run the tests until all of them pass perfectly. Run lint and other quality tools to ensure the code quality and fix any issues found. Do NOT delete `architect_plan.md` as it is needed by the Reviewer in the next step."
-    },
-    {
-        "step_name": "Code Reviewer (Review - PLAN)",
-        "tool": "agy",
-        "model": "gemini-3.5-flash",
-        "reasoning_budget": "high",
-        "timeout": "10m",
-        "prompt": "Act as a Staff Engineer reviewer. Read the `architect_plan.md` file for context and analyze the recent changes. Are all the new important cases being covered with tests? Is the code clean, secure, and free of code smells? Do NOT modify the code or run refactoring. Instead, create a detailed refactoring plan listing all identified issues, code smells, and step-by-step refactoring/fixing instructions. Write this plan into a file named `refactor_plan.md` in the root of the repository. After the review, delete the `architect_plan.md` file."
-    },
-    {
-        "step_name": "Refactoring Developer (Refactoring - REFACTOR)",
-        "tool": "agy",
-        "model": "gemini-3.5-flash",
-        "reasoning_budget": "medium",
-        "timeout": "10m",
-        "prompt": "Read the `refactor_plan.md` file created by the Code Reviewer in the root of the repository. Strictly follow and execute the plan of the code reviewer to fix and refactor the code. Do not perform any changes that are not in the plan. Ensure that the entire test suite continues to pass after your fixes. Once all fixes and refactoring are successfully done, delete the `refactor_plan.md` file."
-    },
-    {
-        "step_name": "GitOps (Documentation and PR)",
-        "tool": "agy",
-        "model": "gemini-3.5-flash",
-        "reasoning_budget": "low",
-        "prompt": "Commit all changes using the Conventional Commits pattern. Push the current branch to origin using `git push origin HEAD`. If the push fails, retry once. Note: The Pull Request will be created automatically by the system orchestrator, so you do NOT need to run `gh pr create` yourself."
-    }
-]
 
 async def run_command_and_stream(command: List[str], cwd: str = "/workspace") -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
@@ -459,6 +323,164 @@ def get_pr_url() -> str:
         pass
     return ""
 
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
+
+def fetch_agy_quota_output(timeout: int = AGY_QUOTA_TIMEOUT) -> str:
+    """Runs the agy TUI /usage command via PTY and returns the captured terminal output."""
+    os.makedirs(AGY_SCRATCH_DIR, exist_ok=True)
+    rows, cols = 40, 120
+    master, slave = pty.openpty()
+    winsize = struct.pack("HHHH", rows, cols, 0, 0)
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, winsize)
+    fcntl.ioctl(master, termios.TIOCSWINSZ, winsize)
+
+    env = os.environ.copy()
+    env["TERM"] = "xterm-256color"
+    proc = subprocess.Popen(
+        ["agy"],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        cwd=AGY_SCRATCH_DIR,
+        close_fds=True,
+        env=env,
+    )
+    os.close(slave)
+
+    chunks: List[str] = []
+    deadline = time.time() + timeout
+    sent_trust = False
+    sent_usage = False
+    usage_sent_at = None
+
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        ready, _, _ = select.select([master], [], [], 0.15)
+        if master not in ready:
+            continue
+        try:
+            chunk = os.read(master, 8192)
+        except OSError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk.decode("utf-8", errors="replace"))
+        plain = _strip_ansi("".join(chunks))
+
+        if not sent_trust and "trust" in plain.lower() and "folder" in plain.lower():
+            os.write(master, b"\r")
+            sent_trust = True
+            time.sleep(1.5)
+
+        if not sent_usage and "Antigravity CLI" in plain and ">" in plain:
+            time.sleep(1.5)
+            os.write(master, b"/usage\r")
+            sent_usage = True
+            usage_sent_at = time.time()
+
+        if sent_usage and usage_sent_at:
+            if "GEMINI MODELS" in plain and "Five Hour Limit" in plain:
+                time.sleep(1)
+                break
+            if time.time() - usage_sent_at > 25:
+                break
+
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    return _strip_ansi("".join(chunks))
+
+def parse_model_quota(text: str) -> Dict[str, Dict[str, Dict[str, float | str]]]:
+    """Parses agy /usage output into remaining and usage percentages per model group."""
+    result: Dict[str, Dict[str, Dict[str, float | str]]] = {}
+    current_group = None
+    current_limit = None
+
+    for line in _strip_ansi(text).splitlines():
+        stripped = line.strip()
+        if stripped.endswith("MODELS") and stripped == stripped.upper():
+            current_group = stripped
+            result.setdefault(current_group, {})
+            current_limit = None
+            continue
+        if stripped in ("Five Hour Limit", "Five-Hour Limit"):
+            current_limit = "five_hour"
+            continue
+        if stripped == "Weekly Limit":
+            current_limit = "weekly"
+            continue
+        if not current_group or not current_limit:
+            continue
+
+        remaining_match = re.search(r"(\d+(?:\.\d+)?)%\s+remaining", stripped, re.IGNORECASE)
+        bar_match = re.search(r"\]\s*(\d+(?:\.\d+)?)%", stripped)
+        refresh_match = re.search(r"Refreshes in\s+(.+)$", stripped, re.IGNORECASE)
+
+        if remaining_match or bar_match:
+            remaining = float(
+                remaining_match.group(1) if remaining_match else bar_match.group(1)
+            )
+            entry = result[current_group].setdefault(current_limit, {})
+            entry["remaining"] = remaining
+            entry["usage"] = round(100 - remaining, 2)
+            if refresh_match:
+                entry["refresh"] = refresh_match.group(1).strip().rstrip("·").strip()
+        elif refresh_match and current_limit in result.get(current_group, {}):
+            result[current_group][current_limit]["refresh"] = refresh_match.group(1).strip()
+
+    return result
+
+def format_model_quota_section(quota_data: Dict[str, Dict[str, Dict[str, float | str]]]) -> str:
+    """Formats parsed quota data for Telegram HTML output."""
+    group_labels = {
+        "GEMINI MODELS": "Gemini",
+        "CLAUDE AND GPT MODELS": "Claude/GPT",
+    }
+    limit_labels = {
+        "five_hour": "Five-Hour",
+        "weekly": "Weekly",
+    }
+
+    lines = ["📉 <b>Model Quota Usage:</b>"]
+    for group, limits in quota_data.items():
+        group_label = group_labels.get(group, group.title())
+        for limit_key in ("five_hour", "weekly"):
+            info = limits.get(limit_key)
+            if not info:
+                continue
+            usage = info["usage"]
+            refresh = info.get("refresh")
+            line = f"  • {group_label} {limit_labels[limit_key]}: <code>{usage:g}%</code> used"
+            if refresh:
+                line += f" (resets in {html.escape(str(refresh))})"
+            lines.append(line)
+
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines) + "\n\n"
+
+def get_model_quota_summary() -> str:
+    """Fetches quota usage when the active tool supports it."""
+    if not get_tool_spec(DEFAULT_AGENT_TOOL).supports_quota:
+        return ""
+    try:
+        output = fetch_agy_quota_output()
+        quota_data = parse_model_quota(output)
+        if not quota_data:
+            return ""
+        return format_model_quota_section(quota_data)
+    except Exception as e:
+        print(f"Error fetching model quota: {e}", flush=True)
+        return ""
+
 async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_url: str, demand: str, is_resume: bool = False):
     chat_id = str(update.effective_chat.id)
     current_task = asyncio.current_task()
@@ -469,6 +491,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
     try:
         project_dir = "/workspace/project"
         github_token = os.environ.get("GITHUB_TOKEN")
+        pipeline_config = resolve_pipeline_config()
 
         # Setup or load session data
         session_data = load_session()
@@ -486,7 +509,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             
             # Determine starting step index
             start_index = 0
-            for i, step in enumerate(PIPELINE_CONFIG):
+            for i, step in enumerate(pipeline_config):
                 step_name = step["step_name"]
                 if steps_status.get(step_name) != "success":
                     start_index = i
@@ -499,7 +522,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                 f"🔄 <b>Resuming pipeline for:</b>\n"
                 f"📦 <b>Repository:</b> <code>{repo_url}</code>\n"
                 f"💡 <b>Demand:</b> <code>{html.escape(demand)}</code>\n"
-                f"⏳ <b>Resuming from step:</b> <code>{PIPELINE_CONFIG[start_index]['step_name']}</code>",
+                f"⏳ <b>Resuming from step:</b> <code>{pipeline_config[start_index]['step_name']}</code>",
                 parse_mode="HTML"
             )
         else:
@@ -599,8 +622,8 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             return
 
         # Execute step loop
-        for idx in range(start_index, len(PIPELINE_CONFIG)):
-            step = PIPELINE_CONFIG[idx]
+        for idx in range(start_index, len(pipeline_config)):
+            step = pipeline_config[idx]
             step_name = step["step_name"]
             
             await update.message.reply_text(
@@ -627,7 +650,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                 if returncode != 0:
                     # Mark step as failed
                     steps_status[step_name] = "failed"
-                    save_session(repo_url, demand, step_name if idx == 0 else PIPELINE_CONFIG[idx-1]["step_name"], steps_status, git_branch)
+                    save_session(repo_url, demand, step_name if idx == 0 else pipeline_config[idx-1]["step_name"], steps_status, git_branch)
                     
                     error_msg = f"⚠️ <b>Failure in step {step_name}:</b>\n\n"
                     if stderr_str.strip():
@@ -674,7 +697,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                     
             except Exception as e:
                 steps_status[step_name] = "failed"
-                save_session(repo_url, demand, step_name if idx == 0 else PIPELINE_CONFIG[idx-1]["step_name"], steps_status, git_branch)
+                save_session(repo_url, demand, step_name if idx == 0 else pipeline_config[idx-1]["step_name"], steps_status, git_branch)
                 await update.message.reply_text(f"❌ System error in step {step_name}: {str(e)}")
                 return
 
@@ -714,7 +737,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
     except asyncio.CancelledError:
         if step_name:
             steps_status[step_name] = "failed"
-            last_completed = step_name if (idx is not None and idx == 0) else PIPELINE_CONFIG[idx-1]["step_name"]
+            last_completed = step_name if (idx is not None and idx == 0) else pipeline_config[idx-1]["step_name"]
             save_session(repo_url, demand, last_completed, steps_status, git_branch)
             await update.message.reply_text(
                 f"🛑 <b>Pipeline stopped in step:</b> <code>{step_name}</code>\n"
@@ -795,14 +818,23 @@ async def send_status(update: Update):
         
     if "demand" not in session:
         repo_url = session.get("repo_url")
+        quota_section = await asyncio.to_thread(get_model_quota_summary)
         if repo_url:
-            await update.message.reply_text(
-                f"ℹ️ No active session in memory.\n📦 <b>Remembered Repository:</b> <code>{repo_url}</code>",
-                parse_mode="HTML"
+            status_msg = (
+                f"ℹ️ No active session in memory.\n"
+                f"📦 <b>Remembered Repository:</b> <code>{repo_url}</code>"
             )
+            if quota_section:
+                status_msg += f"\n\n{quota_section.rstrip()}"
+            await update.message.reply_text(status_msg, parse_mode="HTML")
         else:
-            await update.message.reply_text("ℹ️ No active session in memory.")
+            if quota_section:
+                await update.message.reply_text(quota_section.rstrip(), parse_mode="HTML")
+            else:
+                await update.message.reply_text("ℹ️ No active session in memory.")
         return
+
+    quota_section = await asyncio.to_thread(get_model_quota_summary)
         
     status_msg = (
         f"🧠 <b>Aegis Session Memory:</b>\n\n"
@@ -810,9 +842,12 @@ async def send_status(update: Update):
         f"💡 <b>Demand:</b> <code>{html.escape(session.get('demand', 'N/A'))}</code>\n"
         f"🌿 <b>Branch:</b> <code>{session.get('git_branch', 'N/A')}</code>\n"
         f"🏁 <b>Last Completed:</b> <code>{session.get('last_completed_step', 'N/A')}</code>\n\n"
-        f"📊 <b>Step Statuses:</b>\n"
     )
-    for step in PIPELINE_CONFIG:
+    if quota_section:
+        status_msg += quota_section
+    status_msg += "📊 <b>Step Statuses:</b>\n"
+    pipeline_config = resolve_pipeline_config()
+    for step in pipeline_config:
         step_name = step["step_name"]
         status = session.get("steps_status", {}).get(step_name, "pending")
         icon = "✅" if status == "success" else "❌" if status == "failed" else "⏳"
@@ -849,7 +884,7 @@ def build_application() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_demand))
     return app
 
-if __name__ == '__main__':
+if __name__ == '__main__':  # pragma: no cover
     # Verify that required tokens are set in environment
     if not TOKEN or not ALLOWED_CHAT_ID:
         print("Error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not defined in environment variables.")

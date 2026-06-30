@@ -22,6 +22,8 @@ services:
     build:
       context: .
       dockerfile: Containerfile
+      args:
+        AGENT_TOOL: ${AGENT_TOOL:-agy}
     container_name: agent_workspace
     security_opt:
       - label=disable
@@ -34,18 +36,12 @@ services:
       - DEFAULT_REPO=${DEFAULT_REPO}
       - AGENT_STEP_TIMEOUT=${AGENT_STEP_TIMEOUT:-5m}
       - AGENT_INTENT_TIMEOUT=${AGENT_INTENT_TIMEOUT:-15s}
+      - AGENT_TOOL=${AGENT_TOOL:-agy}
       - SSH_AUTH_SOCK=${SSH_AUTH_SOCK}
       - DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}
       - GIT_SSH_COMMAND=ssh -i /root/.ssh/id_aegis -o IdentitiesOnly=yes
     volumes:
-      # Mounting directories for local login/credentials session files of the official CLIs
-      - ~/.config/aegis-phalanx:/root/.config/aegis-phalanx:Z
-      - ~/.config/gh:/root/.config/gh:Z
-      - ~/.config/claude:/root/.config/claude:Z
-      - ~/.config/antigravity:/root/.config/antigravity:Z
-      - ~/.gemini/antigravity:/root/.gemini/antigravity:Z
-      - ~/.gemini/antigravity-cli:/root/.gemini/antigravity-cli:Z
-      - ~/.antigravity:/root/.antigravity:Z
+      # Tool-specific credential mounts are generated in compose.tool.yml
       - ${SSH_AUTH_SOCK:-/dev/null}:${SSH_AUTH_SOCK:-/dev/null}
       - ~/.ssh/id_aegis:/root/.ssh/id_aegis:ro
       - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
@@ -53,5 +49,4 @@ services:
     networks:
       - agent_network
     working_dir: /workspace
-    # Start the multi-model orchestrator
     command: python3 /workspace/telegram_listener.py

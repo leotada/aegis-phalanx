@@ -1,0 +1,35 @@
+[project]
+name = "aegis-phalanx"
+version = "0.1.0"
+description = "Telegram-orchestrated Podman TDD pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "python-telegram-bot",
+]
+
+[project.optional-dependencies]
+test = [
+    "anyio",
+    "psycopg2-binary",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "pytest-xdist",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["agents", "telegram_listener", "scripts"]
+omit = ["telegram_listener.py:887-895"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+fail_under = 99
+skip_covered = false

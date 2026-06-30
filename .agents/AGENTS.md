@@ -23,3 +23,4 @@ This document outlines the operational guidelines and rules that all AI agents o
 
 ## 5. Development environment
 * Use podman compose to manage the development environment (with space).
+* **Host isolation**: The Podman container must protect the host. Do not mount or expose host directories (e.g. the project workspace, home directory, or arbitrary paths). Only bind-mount the specific config or credential files the container needs to run (CLI auth, SSH keys, etc.), prefer `:ro` when read-only access is sufficient, and nothing else.
