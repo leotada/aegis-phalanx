@@ -741,8 +741,19 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_status(update: Update):
     session = load_session()
-    if not session or "demand" not in session:
+    if not session:
         await update.message.reply_text("ℹ️ No active session in memory.")
+        return
+        
+    if "demand" not in session:
+        repo_url = session.get("repo_url")
+        if repo_url:
+            await update.message.reply_text(
+                f"ℹ️ No active session in memory.\n📦 <b>Remembered Repository:</b> <code>{repo_url}</code>",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text("ℹ️ No active session in memory.")
         return
         
     status_msg = (

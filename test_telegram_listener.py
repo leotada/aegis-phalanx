@@ -482,9 +482,12 @@ async def test_send_status_incomplete_session():
     with patch("telegram_listener.load_session", return_value={"repo_url": "https://github.com/owner/repo.git"}):
         await telegram_listener.send_status(mock_update)
         
-    mock_update.message.reply_text.assert_called_once_with(
-        "ℹ️ No active session in memory."
-    )
+    mock_update.message.reply_text.assert_called_once()
+    args, kwargs = mock_update.message.reply_text.call_args
+    status_msg = args[0]
+    assert "ℹ️ No active session in memory." in status_msg
+    assert "https://github.com/owner/repo.git" in status_msg
+    assert kwargs.get("parse_mode") == "HTML"
 
 
 @pytest.mark.anyio
