@@ -23,6 +23,8 @@ services:
       context: .
       dockerfile: Containerfile
     container_name: agent_workspace
+    security_opt:
+      - label=disable
     environment:
       # Infrastructure
       - GITHUB_TOKEN=${GITHUB_TOKEN}
@@ -30,15 +32,21 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID} # Security: Dedicated bot for your user only
       - DATABASE_URL=postgresql://admin:admin@db:5432/appdb
       - SSH_AUTH_SOCK=${SSH_AUTH_SOCK}
+      - DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
     volumes:
       - ./:/workspace:Z
       # Mounting directories for local login/credentials session files of the official CLIs
       - ~/.config/claude:/root/.config/claude:Z
       - ~/.config/antigravity:/root/.config/antigravity:Z
+      - ~/.gemini/antigravity:/root/.gemini/antigravity:Z
+      - ~/.gemini/antigravity-cli:/root/.gemini/antigravity-cli:Z
+      - ~/.antigravity:/root/.antigravity:Z
       # Mounting user's local SSH Agent socket for Git/GitHub SSH authentication
       - ${SSH_AUTH_SOCK}:${SSH_AUTH_SOCK}:z
       # Mounting host ~/.ssh directory for keys and known_hosts
       - ~/.ssh:/root/.ssh:ro,z
+      # Mounting host DBus socket for keyring access
+      - /run/user/1000/bus:/run/user/1000/bus:z
     networks:
       - agent_network
     working_dir: /workspace

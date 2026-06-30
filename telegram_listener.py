@@ -29,11 +29,21 @@ class AgentCLI(ABC):
 class AntigravityAgentCLI(AgentCLI):
     """Adapter for the official Antigravity CLI (Google)."""
     def build_command(self, prompt: str, model: str, reasoning_budget: str) -> List[str]:
+        # Map slugs to the exact names displayed in `agy models`
+        model_map = {
+            "gemini-3.1-pro": "Gemini 3.1 Pro",
+            "gemini-3.5-flash": "Gemini 3.5 Flash"
+        }
+        
+        base_name = model_map.get(model.lower(), model)
+        budget = reasoning_budget.capitalize() if reasoning_budget else "Medium"
+        full_model_name = f"{base_name} ({budget})"
+        
         return [
             "agy",
-            "--model", model,
-            "--thinking", reasoning_budget,
-            "/goal", prompt
+            "--model", full_model_name,
+            "--dangerously-skip-permissions",
+            "--print", prompt
         ]
 
 
