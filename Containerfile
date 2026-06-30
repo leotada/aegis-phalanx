@@ -20,3 +20,6 @@ RUN pip install --no-cache-dir \
     pytest pytest-xdist psycopg2-binary
 
 WORKDIR /workspace
+
+# Copy orchestrator and config files into the image
+COPY telegram_listener.py .agyrules system_prompt.txt /workspace/
