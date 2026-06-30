@@ -457,4 +457,65 @@ async def test_pipeline_orchestrates_pr_creation_on_fallback(monkeypatch):
     assert "https://github.com/owner/repo/pull/42" in final_call
 
 
+@pytest.mark.anyio
+async def test_send_status_no_session():
+    import telegram_listener
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    
+    with patch("telegram_listener.load_session", return_value=None):
+        await telegram_listener.send_status(mock_update)
+        
+    mock_update.message.reply_text.assert_called_once_with(
+        "ℹ️ No active session in memory."
+    )
+
+
+@pytest.mark.anyio
+async def test_send_status_incomplete_session():
+    import telegram_listener
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    
+    with patch("telegram_listener.load_session", return_value={"repo_url": "https://github.com/owner/repo.git"}):
+        await telegram_listener.send_status(mock_update)
+        
+    mock_update.message.reply_text.assert_called_once_with(
+        "ℹ️ No active session in memory."
+    )
+
+
+@pytest.mark.anyio
+async def test_send_status_complete_session():
+    import telegram_listener
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    
+    dummy_session = {
+        "repo_url": "https://github.com/owner/repo.git",
+        "demand": "do something & test",
+        "git_branch": "feature/do-something",
+        "last_completed_step": "Architect (Planning - PLAN)",
+        "steps_status": {
+            "Architect (Planning - PLAN)": "success"
+        }
+    }
+    
+    with patch("telegram_listener.load_session", return_value=dummy_session):
+        await telegram_listener.send_status(mock_update)
+        
+    mock_update.message.reply_text.assert_called_once()
+    args, kwargs = mock_update.message.reply_text.call_args
+    status_msg = args[0]
+    assert "Aegis Session Memory" in status_msg
+    assert "owner/repo.git" in status_msg
+    assert "do something &amp; test" in status_msg
+    assert "feature/do-something" in status_msg
+    assert "Architect (Planning - PLAN)" in status_msg
+
+
+
 

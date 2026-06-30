@@ -741,16 +741,16 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def send_status(update: Update):
     session = load_session()
-    if not session:
+    if not session or "demand" not in session:
         await update.message.reply_text("ℹ️ No active session in memory.")
         return
         
     status_msg = (
         f"🧠 <b>Aegis Session Memory:</b>\n\n"
-        f"📦 <b>Repository:</b> <code>{session['repo_url']}</code>\n"
-        f"💡 <b>Demand:</b> <code>{session['demand']}</code>\n"
-        f"🌿 <b>Branch:</b> <code>{session['git_branch']}</code>\n"
-        f"🏁 <b>Last Completed:</b> <code>{session['last_completed_step']}</code>\n\n"
+        f"📦 <b>Repository:</b> <code>{session.get('repo_url', 'N/A')}</code>\n"
+        f"💡 <b>Demand:</b> <code>{html.escape(session.get('demand', 'N/A'))}</code>\n"
+        f"🌿 <b>Branch:</b> <code>{session.get('git_branch', 'N/A')}</code>\n"
+        f"🏁 <b>Last Completed:</b> <code>{session.get('last_completed_step', 'N/A')}</code>\n\n"
         f"📊 <b>Step Statuses:</b>\n"
     )
     for step in PIPELINE_CONFIG:
