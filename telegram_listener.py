@@ -14,7 +14,7 @@ from typing import Dict, List
 from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, Application
 
-from agents import AgentRegistry, DEFAULT_AGENT_TOOL, resolve_pipeline_config
+from agents import AgentRegistry, DEFAULT_AGENT_TOOL, resolve_pipeline_config, resolve_review_pipeline_config
 from agents.config import AGENT_INTENT_TIMEOUT, AGENT_STEP_TIMEOUT
 from agents.tool_specs import get_tool_spec
 
@@ -127,6 +127,48 @@ def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -
         return normalize_repo_url(last_repo), demand
         
     return None, demand
+
+def parse_pr_reference(text: str, default_repo: str = None) -> tuple[str | None, int | None]:
+    """
+    Parses a PR reference from user input.
+    Supported formats:
+      - owner/repo#123
+      - owner/repo:123 or owner/repo 123
+      - https://github.com/owner/repo/pull/123
+      - #123 or 123 (requires default_repo)
+    Returns (repo_url, pr_number) or (None, None) if unparseable.
+    """
+    cleaned = re.sub(r"^/review\s*", "", text.strip(), flags=re.IGNORECASE).strip()
+
+    url_match = re.search(
+        r"https?://github\.com/([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+)/pull/(\d+)",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if url_match:
+        return normalize_repo_url(url_match.group(1)), int(url_match.group(2))
+
+    hash_match = re.match(
+        r"^([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+?)#(\d+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if hash_match:
+        return normalize_repo_url(hash_match.group(1)), int(hash_match.group(2))
+
+    sep_match = re.match(
+        r"^([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+?)\s*[:\s]\s*(\d+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if sep_match:
+        return normalize_repo_url(sep_match.group(1)), int(sep_match.group(2))
+
+    num_match = re.match(r"^#?(\d+)$", cleaned)
+    if num_match and default_repo:
+        return normalize_repo_url(default_repo), int(num_match.group(1))
+
+    return None, None
 
 SESSION_FILE_PATH = "/root/.config/aegis-phalanx/session.json"
 AGY_SCRATCH_DIR = "/root/.gemini/antigravity-cli/scratch"
@@ -751,6 +793,108 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
         if ACTIVE_TASKS.get(chat_id) == current_task:
             ACTIVE_TASKS.pop(chat_id, None)
 
+async def run_pr_review(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_url: str, pr_number: int):
+    """Clones a repo, runs a single PR review step, and returns only the review text."""
+    project_dir = "/workspace/project"
+    repo_owner_name = extract_owner_repo(repo_url) or repo_url
+    github_token = os.environ.get("GITHUB_TOKEN")
+    review_config = resolve_review_pipeline_config()
+    step = review_config[0]
+
+    if not github_token and repo_url.startswith("https://github.com/"):
+        await update.message.reply_text(
+            "❌ Error: GITHUB_TOKEN environment variable is not defined and is required for HTTPS repository cloning."
+        )
+        return
+
+    auth_repo_url = (
+        repo_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
+        if github_token and repo_url.startswith("https://")
+        else repo_url
+    )
+
+    try:
+        if os.path.exists(project_dir):
+            proc = await asyncio.create_subprocess_exec("rm", "-rf", project_dir)
+            await proc.wait()
+
+        clone_proc = await asyncio.create_subprocess_exec(
+            "git", "clone", auth_repo_url, project_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr_c = await clone_proc.communicate()
+        if clone_proc.returncode != 0:
+            err = stderr_c.decode("utf-8", errors="replace")[:800]
+            await update.message.reply_text(
+                f"❌ <b>Failed to clone repository.</b>\n<b>Stderr:</b>\n<pre>{html.escape(err)}</pre>",
+                parse_mode="HTML",
+            )
+            return
+
+        checkout_proc = await asyncio.create_subprocess_exec(
+            "gh", "pr", "checkout", str(pr_number), "--repo", repo_owner_name,
+            cwd=project_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, checkout_err = await checkout_proc.communicate()
+        if checkout_proc.returncode != 0:
+            err = checkout_err.decode("utf-8", errors="replace")[:800]
+            await update.message.reply_text(
+                f"❌ <b>Failed to checkout PR #{pr_number}.</b>\n<b>Stderr:</b>\n<pre>{html.escape(err)}</pre>",
+                parse_mode="HTML",
+            )
+            return
+
+        prompt_content = step["prompt"].format(
+            pr_number=pr_number,
+            repo_owner_name=repo_owner_name,
+        )
+
+        agent_cli = AgentRegistry.get_agent(step["tool"])
+        command = agent_cli.build_command(
+            prompt=prompt_content,
+            model=step["model"],
+            reasoning_budget=step["reasoning_budget"],
+            timeout=step.get("timeout"),
+        )
+
+        returncode, stdout_str, stderr_str = await run_command_and_stream(command, cwd=project_dir)
+
+        if returncode != 0:
+            error_msg = f"❌ <b>PR review failed.</b>\n\n"
+            if stderr_str.strip():
+                error_msg += f"<b>Stderr:</b>\n<pre>{html.escape(stderr_str[:800])}</pre>\n\n"
+            if stdout_str.strip():
+                error_msg += f"<b>Stdout:</b>\n<pre>{html.escape(stdout_str[:800])}</pre>"
+            await update.message.reply_text(error_msg, parse_mode="HTML")
+            return
+
+        review_text = stdout_str.strip()
+        if not review_text:
+            await update.message.reply_text("❌ PR review returned no output.")
+            return
+
+        await _send_review_text(update, review_text)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ PR review error: {html.escape(str(e))}", parse_mode="HTML")
+
+async def _send_review_text(update: Update, review_text: str) -> None:
+    """Sends the review text to Telegram, splitting into chunks if needed."""
+    max_len = 4000
+    escaped = html.escape(review_text)
+    if len(escaped) <= max_len:
+        await update.message.reply_text(f"<pre>{escaped}</pre>", parse_mode="HTML")
+        return
+
+    start = 0
+    while start < len(escaped):
+        chunk = escaped[start:start + max_len]
+        await update.message.reply_text(f"<pre>{chunk}</pre>", parse_mode="HTML")
+        start += max_len
+
 async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if chat_id != ALLOWED_CHAT_ID:
@@ -810,6 +954,25 @@ async def handle_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     delete_session()
     await update.message.reply_text("🧹 Session memory cleared successfully.")
 
+async def handle_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id != ALLOWED_CHAT_ID:
+        return
+
+    default_repo = os.environ.get("DEFAULT_REPO")
+    repo_url, pr_number = parse_pr_reference(update.message.text or "", default_repo)
+
+    if not repo_url or pr_number is None:
+        await update.message.reply_text(
+            "❌ Usage: <code>/review owner/repo#123</code>\n"
+            "Formats: <code>owner/repo#123</code>, <code>owner/repo:123</code>, "
+            "<code>https://github.com/owner/repo/pull/123</code>, or <code>/review 123</code> with DEFAULT_REPO set.",
+            parse_mode="HTML",
+        )
+        return
+
+    await run_pr_review(update, context, repo_url, pr_number)
+
 async def send_status(update: Update):
     session = load_session()
     if not session:
@@ -866,7 +1029,8 @@ async def post_init(application: Application) -> None:
         BotCommand("continue", "Resume the last paused/failed pipeline step"),
         BotCommand("status", "Query current pipeline status and memory"),
         BotCommand("stop", "Stop the current running pipeline"),
-        BotCommand("clear", "Clear active session memory")
+        BotCommand("clear", "Clear active session memory"),
+        BotCommand("review", "Review an existing GitHub PR"),
     ])
 
 def build_application() -> Application:
@@ -881,6 +1045,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("stop", handle_stop))
     app.add_handler(CommandHandler("clear", handle_clear))
+    app.add_handler(CommandHandler("review", handle_review))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_demand))
     return app
 
