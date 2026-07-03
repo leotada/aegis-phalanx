@@ -13,6 +13,7 @@ class AntigravityAgentCLI(AgentCLI):
         model: str,
         reasoning_budget: str,
         timeout: str = None,
+        read_only: bool = False,
     ) -> List[str]:
         model_map = {
             "gemini-3.1-pro": "Gemini 3.1 Pro",

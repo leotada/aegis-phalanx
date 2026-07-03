@@ -52,21 +52,37 @@ def test_antigravity_cli_per_step_timeout_override():
     assert cmd[idx + 1] == "20m"
 
 
-def test_cursor_cli_build_command():
+def test_cursor_cli_build_command(monkeypatch):
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
     cli = CursorAgentCLI()
     cmd = cli.build_command("Test prompt", "gemini-3.1-pro", "high", timeout="15m")
 
     assert cmd[0] == "agent"
-    assert "-p" in cmd
-    assert cmd[cmd.index("-p") + 1] == "Test prompt"
+    assert "--print" in cmd
+    assert "Test prompt" in cmd
+    assert cmd.index("Test prompt") > cmd.index("--print")
     assert "--model" in cmd
     assert cmd[cmd.index("--model") + 1] == "auto"
     assert "--trust" in cmd
     assert "--force" in cmd
+    assert "--mode" not in cmd
     assert "--api-key" not in cmd
 
 
-def test_cursor_cli_always_uses_auto_model():
+def test_cursor_cli_read_only_review_command(monkeypatch):
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    cli = CursorAgentCLI()
+    cmd = cli.build_command("Review prompt", "auto", "high", read_only=True)
+
+    assert "--print" in cmd
+    assert "--mode" in cmd
+    assert cmd[cmd.index("--mode") + 1] == "ask"
+    assert "--force" not in cmd
+    assert "Review prompt" in cmd
+
+
+def test_cursor_cli_always_uses_auto_model(monkeypatch):
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
     cli = CursorAgentCLI()
     cmd = cli.build_command("Another prompt", "gemini-3.5-flash", "low")
 
@@ -868,6 +884,7 @@ async def test_run_pr_review_returns_review_only(monkeypatch):
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
          patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "fetch_pr_context", new_callable=AsyncMock, return_value="PR context"), \
          patch.object(telegram_listener, "run_command_and_stream", return_value=(0, review_output, "")):
         await telegram_listener.run_pr_review(
             mock_update, mock_context, "git@github.com:owner/repo.git", 42
@@ -950,11 +967,59 @@ async def test_send_review_text_splits_long_messages():
     await telegram_listener._send_review_text(mock_update, long_review)
 
     assert mock_update.message.reply_text.call_count == 3
+    # All chunks must be sent as HTML (so formatting/highlighting is applied).
+    for call in mock_update.message.reply_text.call_args_list:
+        assert call.kwargs.get("parse_mode") == "HTML"
+
+
+def test_render_markdown_code_block_gets_language_marker():
+    import telegram_listener
+
+    md = "Here:\n\n```python\ndef foo():\n    return 1 < 2\n```\n"
+    messages = telegram_listener.render_markdown_messages(md)
+    joined = "\n".join(messages)
+    assert '<pre><code class="language-python">' in joined
+    assert "</code></pre>" in joined
+    # Code content must be HTML-escaped inside the block.
+    assert "1 &lt; 2" in joined
+
+
+def test_render_markdown_inline_formatting():
+    import telegram_listener
+
+    md = "# Title\n\nThis is **bold**, *italic*, and `code` with a [link](https://x.io/a?b=1&c=2)."
+    out = "\n".join(telegram_listener.render_markdown_messages(md))
+    assert "<b>Title</b>" in out
+    assert "<b>bold</b>" in out
+    assert "<i>italic</i>" in out
+    assert "<code>code</code>" in out
+    # URL should be escaped exactly once (no double escaping).
+    assert '<a href="https://x.io/a?b=1&amp;c=2">link</a>' in out
+
+
+def test_render_markdown_code_block_without_language():
+    import telegram_listener
+
+    md = "```\nplain code\n```"
+    out = "\n".join(telegram_listener.render_markdown_messages(md))
+    assert "<pre>plain code</pre>" in out
+
+
+def test_render_markdown_never_splits_inside_message_limit():
+    import telegram_listener
+
+    md = "```python\n" + "\n".join(f"line_{i} = {i}" for i in range(2000)) + "\n```"
+    messages = telegram_listener.render_markdown_messages(md, max_len=1000)
+    for m in messages:
+        assert len(m) <= 1000
+        # Every chunk must have balanced <pre> open/close tags (never split mid-block).
+        assert m.count("<pre") == m.count("</pre>")
 
 
 @pytest.mark.anyio
-async def test_run_pr_review_requires_token_for_https(monkeypatch):
-    from unittest.mock import AsyncMock, MagicMock
+async def test_run_pr_review_errors_when_no_credentials(monkeypatch):
+    """With no token, no gh CLI, and no SSH key, review must fail with a helpful message."""
+    from unittest.mock import AsyncMock, MagicMock, patch
     import telegram_listener
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -964,12 +1029,69 @@ async def test_run_pr_review_requires_token_for_https(monkeypatch):
     mock_update.message.reply_text = AsyncMock()
     mock_context = MagicMock()
 
-    await telegram_listener.run_pr_review(
-        mock_update, mock_context, "https://github.com/owner/repo.git", 42
-    )
+    with patch.object(telegram_listener, "_gh_auth_token", AsyncMock(return_value=None)), \
+         patch.object(telegram_listener, "_ssh_github_available", AsyncMock(return_value=False)):
+        await telegram_listener.run_pr_review(
+            mock_update, mock_context, "https://github.com/owner/repo.git", 42
+        )
 
     mock_update.message.reply_text.assert_called_once()
-    assert "GITHUB_TOKEN" in mock_update.message.reply_text.call_args[0][0]
+    msg = mock_update.message.reply_text.call_args[0][0]
+    assert "GITHUB_TOKEN" in msg
+    assert "gh auth login" in msg
+
+
+@pytest.mark.anyio
+async def test_resolve_clone_url_prefers_env_token(monkeypatch):
+    import telegram_listener
+
+    url, method, error = await telegram_listener.resolve_clone_url(
+        "https://github.com/owner/repo.git", "gho_envtoken"
+    )
+    assert error is None
+    assert method == "github-token"
+    assert url == "https://x-access-token:gho_envtoken@github.com/owner/repo.git"
+
+
+@pytest.mark.anyio
+async def test_resolve_clone_url_falls_back_to_gh_cli(monkeypatch):
+    from unittest.mock import AsyncMock, patch
+    import telegram_listener
+
+    with patch.object(telegram_listener, "_gh_auth_token", AsyncMock(return_value="gho_ghtoken")):
+        url, method, error = await telegram_listener.resolve_clone_url(
+            "https://github.com/owner/repo.git", None
+        )
+    assert error is None
+    assert method == "gh-cli"
+    assert url == "https://x-access-token:gho_ghtoken@github.com/owner/repo.git"
+
+
+@pytest.mark.anyio
+async def test_resolve_clone_url_falls_back_to_ssh(monkeypatch):
+    from unittest.mock import AsyncMock, patch
+    import telegram_listener
+
+    with patch.object(telegram_listener, "_gh_auth_token", AsyncMock(return_value=None)), \
+         patch.object(telegram_listener, "_ssh_github_available", AsyncMock(return_value=True)):
+        url, method, error = await telegram_listener.resolve_clone_url(
+            "https://github.com/owner/repo.git", None
+        )
+    assert error is None
+    assert method == "ssh"
+    assert url == "git@github.com:owner/repo.git"
+
+
+@pytest.mark.anyio
+async def test_resolve_clone_url_ssh_url_unchanged(monkeypatch):
+    import telegram_listener
+
+    url, method, error = await telegram_listener.resolve_clone_url(
+        "git@github.com:owner/repo.git", None
+    )
+    assert error is None
+    assert method == "ssh"
+    assert url == "git@github.com:owner/repo.git"
 
 
 @pytest.mark.anyio
@@ -995,6 +1117,7 @@ async def test_run_pr_review_removes_existing_project_dir(monkeypatch):
 
     with patch("asyncio.create_subprocess_exec", side_effect=[rm_process, clone_process, checkout_process]), \
          patch("os.path.exists", return_value=True), \
+         patch.object(telegram_listener, "fetch_pr_context", new_callable=AsyncMock, return_value="PR context"), \
          patch.object(telegram_listener, "run_command_and_stream", return_value=(0, "Review text", "")):
         await telegram_listener.run_pr_review(
             mock_update, mock_context, "git@github.com:owner/repo.git", 42
@@ -1025,6 +1148,7 @@ async def test_run_pr_review_agent_failure(monkeypatch):
 
     with patch("asyncio.create_subprocess_exec", side_effect=[clone_process, checkout_process]), \
          patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "fetch_pr_context", new_callable=AsyncMock, return_value="PR context"), \
          patch.object(telegram_listener, "run_command_and_stream", return_value=(1, "partial", "agent failed")):
         await telegram_listener.run_pr_review(
             mock_update, mock_context, "git@github.com:owner/repo.git", 42
@@ -1055,6 +1179,7 @@ async def test_run_pr_review_empty_output(monkeypatch):
 
     with patch("asyncio.create_subprocess_exec", side_effect=[clone_process, checkout_process]), \
          patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "fetch_pr_context", new_callable=AsyncMock, return_value="PR context"), \
          patch.object(telegram_listener, "run_command_and_stream", return_value=(0, "   ", "")):
         await telegram_listener.run_pr_review(
             mock_update, mock_context, "git@github.com:owner/repo.git", 42
@@ -1083,4 +1208,85 @@ async def test_run_pr_review_handles_exception(monkeypatch):
 
     mock_update.message.reply_text.assert_called_once()
     assert "PR review error" in mock_update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.anyio
+async def test_fetch_pr_context_combines_metadata_and_diff():
+    import telegram_listener
+
+    view_process = AsyncMock()
+    view_process.returncode = 0
+    view_process.communicate.return_value = (b"title: Fix bug", b"")
+
+    diff_process = AsyncMock()
+    diff_process.returncode = 0
+    diff_process.communicate.return_value = (b"+added line", b"")
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[view_process, diff_process]):
+        context = await telegram_listener.fetch_pr_context("owner/repo", 7, "/workspace/project")
+
+    assert "title: Fix bug" in context
+    assert "--- Diff ---" in context
+    assert "+added line" in context
+
+
+@pytest.mark.anyio
+async def test_fetch_pr_context_truncates_large_diff():
+    import telegram_listener
+
+    view_process = AsyncMock()
+    view_process.returncode = 0
+    view_process.communicate.return_value = (b"title: Big PR", b"")
+
+    diff_process = AsyncMock()
+    diff_process.returncode = 0
+    diff_process.communicate.return_value = (b"x" * 200_000, b"")
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[view_process, diff_process]):
+        context = await telegram_listener.fetch_pr_context(
+            "owner/repo", 7, "/workspace/project", max_diff_chars=1000
+        )
+
+    assert "title: Big PR" in context
+    assert "diff truncated" in context
+    assert len(context) < 200_000
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_uses_cursor_ask_mode(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("AGENT_TOOL", "cursor")
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    clone_process = AsyncMock()
+    clone_process.returncode = 0
+    clone_process.communicate.return_value = (b"", b"")
+    checkout_process = AsyncMock()
+    checkout_process.returncode = 0
+    checkout_process.communicate.return_value = (b"", b"")
+
+    captured_command = []
+
+    async def capture_stream(command, cwd="/workspace"):
+        captured_command.extend(command)
+        return 0, "Review complete", ""
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[clone_process, checkout_process]), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "fetch_pr_context", new_callable=AsyncMock, return_value="PR context"), \
+         patch.object(telegram_listener, "run_command_and_stream", side_effect=capture_stream):
+        await telegram_listener.run_pr_review(
+            mock_update, mock_context, "git@github.com:owner/repo.git", 42
+        )
+
+    assert "--mode" in captured_command
+    assert captured_command[captured_command.index("--mode") + 1] == "ask"
+    assert "--force" not in captured_command
 

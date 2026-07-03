@@ -12,6 +12,7 @@ class AiderAgentCLI(AgentCLI):
         model: str,
         reasoning_budget: str,
         timeout: str = None,
+        read_only: bool = False,
     ) -> List[str]:
         return [
             "aider",

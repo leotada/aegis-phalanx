@@ -2,6 +2,7 @@ import os
 import asyncio
 import html
 import re
+import shutil
 import subprocess
 import json
 import select
@@ -71,6 +72,95 @@ def extract_owner_repo(repo_url: str) -> str | None:
         return https_match.group(1)
 
     return None
+
+
+async def _gh_auth_token() -> str | None:
+    """Returns a token from an authenticated gh CLI, or None if unavailable."""
+    if shutil.which("gh") is None:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "auth", "token",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    token = out.decode("utf-8", errors="replace").strip()
+    return token or None
+
+
+async def _ssh_github_available() -> bool:
+    """Checks whether an SSH key can authenticate against github.com (non-interactively)."""
+    if shutil.which("ssh") is None:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", "-T",
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
+            "git@github.com",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await proc.communicate()
+    except Exception:
+        return False
+    # GitHub always closes the shell (exit 1) but greets authenticated users.
+    output = (out + err).decode("utf-8", errors="replace").lower()
+    return "successfully authenticated" in output
+
+
+async def resolve_clone_url(repo_url: str, github_token: str | None) -> tuple[str | None, str, str | None]:
+    """
+    Resolves the best authenticated clone URL for a GitHub repository.
+
+    Returns a tuple of (clone_url, method, error). When error is not None,
+    clone_url is None and no credentials could be resolved.
+
+    Credential preference for HTTPS GitHub URLs: GITHUB_TOKEN -> gh CLI -> SSH key.
+    Already-SSH URLs and non-GitHub URLs are returned unchanged.
+    """
+    if not repo_url:
+        return repo_url, "as-is", None
+
+    # SSH URLs rely on the local SSH key/agent; use them unchanged.
+    if repo_url.startswith("git@") or repo_url.startswith("ssh://"):
+        return repo_url, "ssh", None
+
+    if not repo_url.startswith("https://github.com/"):
+        # Non-GitHub HTTPS (or other) URL: leave it to git's own credential handling.
+        return repo_url, "as-is", None
+
+    def _with_token(token: str) -> str:
+        return repo_url.replace(
+            "https://github.com/", f"https://x-access-token:{token}@github.com/"
+        )
+
+    # 1. Explicit token (existing behavior).
+    if github_token:
+        return _with_token(github_token), "github-token", None
+
+    # 2. gh CLI credentials (preferred fallback).
+    gh_token = await _gh_auth_token()
+    if gh_token:
+        return _with_token(gh_token), "gh-cli", None
+
+    # 3. SSH key fallback.
+    owner_repo = extract_owner_repo(repo_url)
+    if owner_repo and await _ssh_github_available():
+        return f"git@github.com:{owner_repo}.git", "ssh", None
+
+    return (
+        None,
+        "none",
+        "No GitHub credentials available. Set GITHUB_TOKEN, authenticate the gh CLI "
+        "(<code>gh auth login</code>), or configure an SSH key for github.com.",
+    )
 
 def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -> tuple[str, str]:
     """
@@ -582,16 +672,11 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                 parse_mode="HTML"
             )
 
-        # Check GITHUB_TOKEN requirement (only HTTPS clones require it)
-        if not github_token and repo_url and repo_url.startswith("https://github.com/"):
-            await update.message.reply_text("❌ Error: GITHUB_TOKEN environment variable is not defined and is required for HTTPS repository cloning.")
+        # Resolve credentials for cloning: GITHUB_TOKEN -> gh CLI -> SSH key
+        auth_repo_url, auth_method, auth_error = await resolve_clone_url(repo_url, github_token)
+        if auth_error:
+            await update.message.reply_text(f"❌ Error: {auth_error}", parse_mode="HTML")
             return
-
-        # Authenticate HTTPS repo URL if GITHUB_TOKEN is available
-        if github_token and repo_url:
-            auth_repo_url = repo_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
-        else:
-            auth_repo_url = repo_url
 
         # Repository setup
         try:
@@ -793,6 +878,45 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
         if ACTIVE_TASKS.get(chat_id) == current_task:
             ACTIVE_TASKS.pop(chat_id, None)
 
+async def fetch_pr_context(
+    repo_owner_name: str,
+    pr_number: int,
+    project_dir: str,
+    max_diff_chars: int = 120_000,
+) -> str:
+    """Fetches PR metadata and diff via gh for injection into the review prompt."""
+    sections: list[str] = []
+
+    view_proc = await asyncio.create_subprocess_exec(
+        "gh", "pr", "view", str(pr_number), "--repo", repo_owner_name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    view_out, view_err = await view_proc.communicate()
+    if view_proc.returncode == 0:
+        sections.append(view_out.decode("utf-8", errors="replace").strip())
+    else:
+        err = view_err.decode("utf-8", errors="replace").strip()
+        sections.append(f"(Could not fetch PR metadata: {err[:500]})")
+
+    diff_proc = await asyncio.create_subprocess_exec(
+        "gh", "pr", "diff", str(pr_number), "--repo", repo_owner_name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=project_dir,
+    )
+    diff_out, diff_err = await diff_proc.communicate()
+    if diff_proc.returncode == 0:
+        diff_text = diff_out.decode("utf-8", errors="replace").strip()
+        if len(diff_text) > max_diff_chars:
+            diff_text = diff_text[:max_diff_chars] + "\n\n… (diff truncated)"
+        sections.append("--- Diff ---\n" + diff_text)
+    else:
+        err = diff_err.decode("utf-8", errors="replace").strip()
+        sections.append(f"(Could not fetch PR diff: {err[:500]})")
+
+    return "\n\n".join(sections)
+
 async def run_pr_review(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_url: str, pr_number: int):
     """Clones a repo, runs a single PR review step, and returns only the review text."""
     project_dir = "/workspace/project"
@@ -801,17 +925,11 @@ async def run_pr_review(update: Update, context: ContextTypes.DEFAULT_TYPE, repo
     review_config = resolve_review_pipeline_config()
     step = review_config[0]
 
-    if not github_token and repo_url.startswith("https://github.com/"):
-        await update.message.reply_text(
-            "❌ Error: GITHUB_TOKEN environment variable is not defined and is required for HTTPS repository cloning."
-        )
+    # Resolve credentials for cloning: GITHUB_TOKEN -> gh CLI -> SSH key
+    auth_repo_url, auth_method, auth_error = await resolve_clone_url(repo_url, github_token)
+    if auth_error:
+        await update.message.reply_text(f"❌ Error: {auth_error}", parse_mode="HTML")
         return
-
-    auth_repo_url = (
-        repo_url.replace("https://github.com/", f"https://x-access-token:{github_token}@github.com/")
-        if github_token and repo_url.startswith("https://")
-        else repo_url
-    )
 
     try:
         if os.path.exists(project_dir):
@@ -850,6 +968,7 @@ async def run_pr_review(update: Update, context: ContextTypes.DEFAULT_TYPE, repo
         prompt_content = step["prompt"].format(
             pr_number=pr_number,
             repo_owner_name=repo_owner_name,
+            pr_context=await fetch_pr_context(repo_owner_name, pr_number, project_dir),
         )
 
         agent_cli = AgentRegistry.get_agent(step["tool"])
@@ -858,6 +977,7 @@ async def run_pr_review(update: Update, context: ContextTypes.DEFAULT_TYPE, repo
             model=step["model"],
             reasoning_budget=step["reasoning_budget"],
             timeout=step.get("timeout"),
+            read_only=True,
         )
 
         returncode, stdout_str, stderr_str = await run_command_and_stream(command, cwd=project_dir)
@@ -881,19 +1001,154 @@ async def run_pr_review(update: Update, context: ContextTypes.DEFAULT_TYPE, repo
     except Exception as e:
         await update.message.reply_text(f"❌ PR review error: {html.escape(str(e))}", parse_mode="HTML")
 
-async def _send_review_text(update: Update, review_text: str) -> None:
-    """Sends the review text to Telegram, splitting into chunks if needed."""
-    max_len = 4000
-    escaped = html.escape(review_text)
-    if len(escaped) <= max_len:
-        await update.message.reply_text(f"<pre>{escaped}</pre>", parse_mode="HTML")
-        return
+def _inline_markdown_to_html(text: str) -> str:
+    """Converts inline Markdown (bold, italic, code, links, headings) to Telegram HTML."""
+    # Protect inline code spans from further processing / escaping.
+    inline_code: list[str] = []
 
-    start = 0
-    while start < len(escaped):
-        chunk = escaped[start:start + max_len]
-        await update.message.reply_text(f"<pre>{chunk}</pre>", parse_mode="HTML")
-        start += max_len
+    def _stash_inline_code(match: "re.Match[str]") -> str:
+        inline_code.append(f"<code>{html.escape(match.group(1))}</code>")
+        return f"\x00IC{len(inline_code) - 1}\x00"
+
+    text = re.sub(r"`([^`\n]+)`", _stash_inline_code, text)
+
+    # Escape everything else so raw HTML in the model output can't break parsing.
+    text = html.escape(text)
+
+    # Links: [label](https://url) — the URL is already HTML-escaped by the step above.
+    text = re.sub(
+        r"\[([^\]]+)\]\((https?://[^\s)]+)\)",
+        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
+        text,
+    )
+
+    # Bold: **text** or __text__
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    text = re.sub(r"(?<!_)__(.+?)__(?!_)", r"<b>\1</b>", text, flags=re.DOTALL)
+
+    # Strikethrough: ~~text~~
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text, flags=re.DOTALL)
+
+    # Italic: *text* / _text_ (single markers, not bullet lists or bold leftovers)
+    text = re.sub(r"(?<![\*\w])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\*\w])", r"<i>\1</i>", text)
+    text = re.sub(r"(?<![_\w])_(?!\s)([^_\n]+?)(?<!\s)_(?![_\w])", r"<i>\1</i>", text)
+
+    # Headings (# .. ######) become bold lines.
+    text = re.sub(r"(?m)^\s*#{1,6}\s+(.+?)\s*$", r"<b>\1</b>", text)
+
+    # Restore inline code spans.
+    text = re.sub(r"\x00IC(\d+)\x00", lambda m: inline_code[int(m.group(1))], text)
+    return text
+
+
+def _split_markdown_blocks(text: str) -> list[tuple[str, str, str]]:
+    """Splits Markdown into ordered (kind, language, content) blocks.
+
+    kind is either "code" (fenced block) or "text". language is only set for code.
+    """
+    blocks: list[tuple[str, str, str]] = []
+    fence_re = re.compile(r"```([^\n`]*)\n?(.*?)```", re.DOTALL)
+    pos = 0
+    for match in fence_re.finditer(text):
+        if match.start() > pos:
+            blocks.append(("text", "", text[pos:match.start()]))
+        lang = match.group(1).strip()
+        code = match.group(2)
+        if code.endswith("\n"):
+            code = code[:-1]
+        blocks.append(("code", lang, code))
+        pos = match.end()
+    if pos < len(text):
+        blocks.append(("text", "", text[pos:]))
+    return blocks
+
+
+def render_markdown_messages(text: str, max_len: int = 3800) -> list[str]:
+    """Renders Markdown into Telegram-HTML message chunks with code syntax highlighting.
+
+    Fenced code blocks become <pre><code class="language-..."> so Telegram applies
+    syntax highlighting. Each returned chunk is self-contained, well-formed HTML that
+    fits within max_len, and code blocks are never split across a tag boundary.
+    """
+    messages: list[str] = []
+    buffer = ""
+
+    def flush() -> None:
+        nonlocal buffer
+        if buffer:
+            messages.append(buffer)
+            buffer = ""
+
+    def push(segment: str) -> None:
+        nonlocal buffer
+        if not segment:
+            return
+        if not buffer:
+            buffer = segment
+        elif len(buffer) + 1 + len(segment) <= max_len:
+            buffer = f"{buffer}\n{segment}"
+        else:
+            flush()
+            buffer = segment
+
+    for kind, lang, content in _split_markdown_blocks(text):
+        if kind == "code":
+            opener = f'<pre><code class="language-{html.escape(lang)}">' if lang else "<pre>"
+            closer = "</code></pre>" if lang else "</pre>"
+            escaped = html.escape(content)
+            if len(opener) + len(escaped) + len(closer) <= max_len:
+                push(f"{opener}{escaped}{closer}")
+                continue
+            # Code block too large: split by lines, re-wrapping each chunk.
+            flush()
+            budget = max(1, max_len - len(opener) - len(closer))
+            current = ""
+            for line in escaped.split("\n"):
+                while len(line) > budget:
+                    if current:
+                        messages.append(f"{opener}{current}{closer}")
+                        current = ""
+                    messages.append(f"{opener}{line[:budget]}{closer}")
+                    line = line[budget:]
+                if current and len(current) + 1 + len(line) > budget:
+                    messages.append(f"{opener}{current}{closer}")
+                    current = ""
+                current = f"{current}\n{line}" if current else line
+            if current:
+                push(f"{opener}{current}{closer}")
+        else:
+            html_text = _inline_markdown_to_html(content)
+            if len(html_text) <= max_len:
+                push(html_text)
+                continue
+            # Text block too large: split on line boundaries to keep inline tags intact.
+            flush()
+            current = ""
+            for line in html_text.split("\n"):
+                if len(line) > max_len:
+                    if current:
+                        messages.append(current)
+                        current = ""
+                    for i in range(0, len(line), max_len):
+                        messages.append(line[i:i + max_len])
+                    continue
+                if current and len(current) + 1 + len(line) > max_len:
+                    messages.append(current)
+                    current = ""
+                current = f"{current}\n{line}" if current else line
+            if current:
+                push(current)
+
+    flush()
+    return messages
+
+
+async def _send_review_text(update: Update, review_text: str) -> None:
+    """Sends the review text to Telegram as formatted Markdown, splitting into chunks if needed."""
+    for chunk in render_markdown_messages(review_text):
+        await update.message.reply_text(
+            chunk, parse_mode="HTML", disable_web_page_preview=True
+        )
 
 async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)

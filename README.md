@@ -96,12 +96,12 @@ No Cursor CLI required on the host. Works with an active Cursor subscription.
    ```
 2. Set `AGENT_TOOL=cursor` in `.env` and run `make build`.
 
-The pipeline invokes `agent -p <prompt> --model auto --trust --force`. Pipeline model/reasoning fields are ignored for Cursor.
+The pipeline invokes `agent --print "<prompt>" --model auto --trust --force`. Pipeline model/reasoning fields are ignored for Cursor. PR reviews use `--mode ask` instead of `--force` (see [PR review](#pr-review-review)).
 
 Verify inside the running container:
 
 ```bash
-podman exec agent_workspace agent -p "say hi" --print --model auto --trust --force
+podman exec agent_workspace agent --print "say hi" --model auto --trust --force
 ```
 
 ### 3. Configure SSH key authentication (optional)
@@ -191,6 +191,7 @@ On failure, state is persisted to `~/.config/aegis-phalanx/session.json` (mounte
 
 - `/continue` or `/resume` — Resume from the first failed/incomplete step.
 - `/status` — Show step statuses, repository, branch, and demand.
+- `/review` — Review an existing GitHub PR (see [PR review](#pr-review-review)).
 - `/stop` — Cancel a running pipeline.
 - `/clear` — Delete session memory.
 
@@ -206,6 +207,44 @@ Model quota usage (`/status`) is shown only when `AGENT_TOOL=agy`.
 
 ---
 
+## PR review (`/review`)
+
+Review an existing GitHub pull request without modifying the repository or posting comments. The bot clones the repo, checks out the PR branch, pre-fetches metadata and diff via `gh`, and runs a single review step with the active `AGENT_TOOL`.
+
+### Usage
+
+```text
+/review owner/repo#123
+```
+
+Supported reference formats:
+
+| Format | Example |
+|--------|---------|
+| `owner/repo#N` | `/review acme/api#42` |
+| `owner/repo:N` or `owner/repo N` | `/review acme/api:42` |
+| GitHub PR URL | `/review https://github.com/acme/api/pull/42` |
+| PR number only | `/review 42` (requires `DEFAULT_REPO` in `.env`) |
+
+### Requirements
+
+- **`GITHUB_TOKEN`** — required for HTTPS clones (same as the TDD pipeline).
+- **`gh` auth** — mounted from `~/.config/gh` on the host; used to check out the PR and fetch context before the agent runs.
+- **`AGENT_TOOL`** — selects which CLI performs the review (rebuild after changing).
+
+### Behavior by tool
+
+| Tool | Review invocation | Notes |
+|------|-------------------|-------|
+| `agy` | `agy --model "Gemini 3.5 Flash (High)" …` | Per-step model and reasoning from `agents/review_pipeline.py` |
+| `cursor` | `agent --print --mode ask --model auto --trust "<prompt>"` | Read-only ask mode; PR context is pre-fetched so the agent does not need `gh` |
+| `claude` | `claude -p … -y` | Pipeline model/reasoning ignored |
+| `aider` | `aider --model … --message …` | Per-step `model` passed to `--model` |
+
+The review text is returned to Telegram only — no commits, file changes, or GitHub comments.
+
+---
+
 ## Architecture
 
 ```
@@ -213,6 +252,7 @@ telegram_listener.py   # Telegram bot and pipeline orchestrator
 agents/
   adapters/            # CLI adapters (agy, cursor, claude, aider)
   pipeline.py          # TDD step definitions
+  review_pipeline.py   # PR review step definition
   registry.py          # Agent factory
   tool_specs.py        # Per-tool install commands and volume mounts
 scripts/

@@ -80,25 +80,25 @@ def test_agy_cli_passes_through_unknown_model_slug():
 
 
 def test_cursor_auth_resolver_skips_empty_api_key():
-    base = ["agent", "-p", "x"]
+    base = ["agent", "--print", "x"]
     assert CursorAuthResolver.augment_command(base) == base
 
 
 def test_cursor_auth_resolver_skips_whitespace_api_key(monkeypatch):
     monkeypatch.setenv("CURSOR_API_KEY", "   ")
-    base = ["agent", "-p", "x"]
+    base = ["agent", "--print", "x"]
     assert CursorAuthResolver.augment_command(base) == base
 
 
 def test_cursor_auth_resolver_appends_api_key(monkeypatch):
     monkeypatch.setenv("CURSOR_API_KEY", "cursor_secret")
-    base = ["agent", "-p", "x"]
+    base = ["agent", "--print", "x"]
     assert CursorAuthResolver.augment_command(base) == base + ["--api-key", "cursor_secret"]
 
 
 def test_cursor_auth_resolver_does_not_mutate_input(monkeypatch):
     monkeypatch.setenv("CURSOR_API_KEY", "key")
-    base = ["agent", "-p", "x"]
+    base = ["agent", "--print", "x"]
     copy_base = list(base)
     CursorAuthResolver.augment_command(base)
     assert base == copy_base
@@ -143,6 +143,7 @@ def test_resolve_review_pipeline_config_explicit_tool():
     assert resolved[0]["tool"] == "claude"
     assert resolved[0]["step_name"] == "PR Reviewer"
     assert "{pr_number}" in resolved[0]["prompt"]
+    assert "{pr_context}" in resolved[0]["prompt"]
 
 
 def test_resolve_review_pipeline_config_deep_copies_steps():

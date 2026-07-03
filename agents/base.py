@@ -12,6 +12,7 @@ class AgentCLI(ABC):
         model: str,
         reasoning_budget: str,
         timeout: str = None,
+        read_only: bool = False,
     ) -> List[str]:
         """Generates the terminal argument list to run the tool."""
         raise NotImplementedError  # pragma: no cover
