@@ -1,4 +1,4 @@
-.PHONY: up build down restart logs status test render-infra
+.PHONY: up build down restart logs status test render-infra db-up db-down
 
 COMPOSE_FILES = -f compose.yml -f compose.tool.yml
 
@@ -12,7 +12,13 @@ build: render-infra
 	podman compose --env-file .env $(COMPOSE_FILES) up -d --build
 
 down:
-	podman compose --env-file .env $(COMPOSE_FILES) down
+	podman compose --env-file .env $(COMPOSE_FILES) --profile db down
+
+db-up: render-infra
+	podman compose --env-file .env $(COMPOSE_FILES) --profile db up -d db
+
+db-down:
+	podman compose --env-file .env $(COMPOSE_FILES) --profile db stop db
 
 restart: render-infra
 	podman compose --env-file .env $(COMPOSE_FILES) restart

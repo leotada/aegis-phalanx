@@ -121,11 +121,21 @@ make build    # First run or after changing AGENT_TOOL
 make up       # Subsequent starts
 ```
 
+This starts only the **agent** container by default. The PostgreSQL database (`agent_postgres`) is **opt-in** — start it when a task needs a database:
+
+```bash
+make db-up    # Start the database container
+make db-down  # Stop the database container
+```
+
+The agent connects via `postgresql://admin:admin@db:5432/appdb` when the database is running.
+
 Or manually:
 
 ```bash
 python3 scripts/render_compose_overlay.py
 podman compose --env-file .env -f compose.yml -f compose.tool.yml up -d --build
+podman compose --env-file .env -f compose.yml -f compose.tool.yml --profile db up -d db  # optional
 ```
 
 ### 5. Activate the bot
@@ -160,9 +170,11 @@ Create a User entity using SQLAlchemy. Write Pytest tests to verify database per
 
 | Command | Description |
 |---------|-------------|
-| `make build` | Render `compose.tool.yml`, build image, start containers |
-| `make up` | Render overlay and start containers |
-| `make down` | Stop the stack |
+| `make build` | Render `compose.tool.yml`, build image, start agent container |
+| `make up` | Render overlay and start agent container |
+| `make down` | Stop the stack (agent and database, if running) |
+| `make db-up` | Start the optional PostgreSQL database container |
+| `make db-down` | Stop the PostgreSQL database container |
 | `make restart` | Re-render overlay and restart |
 | `make logs` | Follow agent container logs |
 | `make status` | Show container status |
