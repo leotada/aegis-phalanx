@@ -7,6 +7,7 @@ from agents.pipeline import PIPELINE_CONFIG, resolve_pipeline_config
 from telegram_listener import (
     sanitize_environment,
     parse_demand,
+    parse_pr_reference,
     save_session,
     load_session,
     clear_session,
@@ -154,6 +155,60 @@ def test_parse_demand_fallback_to_last_repo():
     assert repo == "https://github.com/owner/last-repo.git"
     assert clean_demand == "just a description"
 
+
+def test_parse_pr_reference_owner_repo_hash():
+    repo, pr_number = parse_pr_reference("owner/repo#42")
+    assert repo == "https://github.com/owner/repo.git"
+    assert pr_number == 42
+
+
+def test_parse_pr_reference_owner_repo_colon():
+    repo, pr_number = parse_pr_reference("owner/repo:42")
+    assert repo == "https://github.com/owner/repo.git"
+    assert pr_number == 42
+
+
+def test_parse_pr_reference_owner_repo_space():
+    repo, pr_number = parse_pr_reference("owner/repo 42")
+    assert repo == "https://github.com/owner/repo.git"
+    assert pr_number == 42
+
+
+def test_parse_pr_reference_github_url():
+    repo, pr_number = parse_pr_reference("https://github.com/owner/repo/pull/99")
+    assert repo == "https://github.com/owner/repo.git"
+    assert pr_number == 99
+
+
+def test_parse_pr_reference_with_review_command_prefix():
+    repo, pr_number = parse_pr_reference("/review owner/repo#7")
+    assert repo == "https://github.com/owner/repo.git"
+    assert pr_number == 7
+
+
+def test_parse_pr_reference_number_with_default_repo():
+    repo, pr_number = parse_pr_reference("123", "default/repo")
+    assert repo == "https://github.com/default/repo.git"
+    assert pr_number == 123
+
+
+def test_parse_pr_reference_hash_number_with_default_repo():
+    repo, pr_number = parse_pr_reference("#456", "default/repo")
+    assert repo == "https://github.com/default/repo.git"
+    assert pr_number == 456
+
+
+def test_parse_pr_reference_invalid_returns_none():
+    repo, pr_number = parse_pr_reference("not a pr reference")
+    assert repo is None
+    assert pr_number is None
+
+
+def test_parse_pr_reference_number_without_default_repo():
+    repo, pr_number = parse_pr_reference("123")
+    assert repo is None
+    assert pr_number is None
+
 def test_save_load_clear_session(tmp_path):
     session_file = tmp_path / "session.json"
     
@@ -242,7 +297,8 @@ async def test_post_init_registers_bot_commands():
         "continue": "Resume the last paused/failed pipeline step",
         "status": "Query current pipeline status and memory",
         "stop": "Stop the current running pipeline",
-        "clear": "Clear active session memory"
+        "clear": "Clear active session memory",
+        "review": "Review an existing GitHub PR",
     }
     
     assert len(commands) == len(expected_commands)
@@ -749,4 +805,282 @@ async def test_handle_stop_with_active_task():
 
 
 
+
+@pytest.mark.anyio
+async def test_handle_review_invalid_reference():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.text = "/review invalid"
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"):
+        await telegram_listener.handle_review(mock_update, mock_context)
+
+    mock_update.message.reply_text.assert_called_once()
+    args, kwargs = mock_update.message.reply_text.call_args
+    assert "Usage" in args[0]
+
+
+@pytest.mark.anyio
+async def test_handle_review_runs_pr_review():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.text = "/review owner/repo#42"
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.run_pr_review", new_callable=AsyncMock) as mock_run:
+        await telegram_listener.handle_review(mock_update, mock_context)
+
+    mock_run.assert_called_once_with(
+        mock_update, mock_context, "https://github.com/owner/repo.git", 42
+    )
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_returns_review_only(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+
+    mock_context = MagicMock()
+
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"", b"")
+
+    review_output = "## Summary\nLooks good.\n\n## Issues\nNone."
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "run_command_and_stream", return_value=(0, review_output, "")):
+        await telegram_listener.run_pr_review(
+            mock_update, mock_context, "git@github.com:owner/repo.git", 42
+        )
+
+    calls = mock_update.message.reply_text.call_args_list
+    assert len(calls) == 1
+    review_msg = calls[0][0][0]
+    assert "Looks good" in review_msg
+    assert "completed successfully" not in review_msg
+    assert "PR Created" not in review_msg
+    assert "Files changed" not in review_msg
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_clone_failure(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    mock_process = AsyncMock()
+    mock_process.returncode = 1
+    mock_process.communicate.return_value = (b"", b"clone failed")
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch("os.path.exists", return_value=False):
+        await telegram_listener.run_pr_review(
+            mock_update, mock_context, "git@github.com:owner/repo.git", 42
+        )
+
+    mock_update.message.reply_text.assert_called_once()
+    assert "Failed to clone" in mock_update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_checkout_failure(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    clone_process = AsyncMock()
+    clone_process.returncode = 0
+    clone_process.communicate.return_value = (b"", b"")
+
+    checkout_process = AsyncMock()
+    checkout_process.returncode = 1
+    checkout_process.communicate.return_value = (b"", b"checkout failed")
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[clone_process, checkout_process]), \
+         patch("os.path.exists", return_value=False):
+        await telegram_listener.run_pr_review(
+            mock_update, mock_context, "git@github.com:owner/repo.git", 42
+        )
+
+    mock_update.message.reply_text.assert_called_once()
+    assert "Failed to checkout PR" in mock_update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.anyio
+async def test_send_review_text_splits_long_messages():
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+
+    long_review = "x" * 9000
+    await telegram_listener._send_review_text(mock_update, long_review)
+
+    assert mock_update.message.reply_text.call_count == 3
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_requires_token_for_https(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    await telegram_listener.run_pr_review(
+        mock_update, mock_context, "https://github.com/owner/repo.git", 42
+    )
+
+    mock_update.message.reply_text.assert_called_once()
+    assert "GITHUB_TOKEN" in mock_update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_removes_existing_project_dir(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    rm_process = AsyncMock()
+    rm_process.returncode = 0
+    clone_process = AsyncMock()
+    clone_process.returncode = 0
+    clone_process.communicate.return_value = (b"", b"")
+    checkout_process = AsyncMock()
+    checkout_process.returncode = 0
+    checkout_process.communicate.return_value = (b"", b"")
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[rm_process, clone_process, checkout_process]), \
+         patch("os.path.exists", return_value=True), \
+         patch.object(telegram_listener, "run_command_and_stream", return_value=(0, "Review text", "")):
+        await telegram_listener.run_pr_review(
+            mock_update, mock_context, "git@github.com:owner/repo.git", 42
+        )
+
+    mock_update.message.reply_text.assert_called_once()
+    assert "Review text" in mock_update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_agent_failure(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    clone_process = AsyncMock()
+    clone_process.returncode = 0
+    clone_process.communicate.return_value = (b"", b"")
+    checkout_process = AsyncMock()
+    checkout_process.returncode = 0
+    checkout_process.communicate.return_value = (b"", b"")
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[clone_process, checkout_process]), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "run_command_and_stream", return_value=(1, "partial", "agent failed")):
+        await telegram_listener.run_pr_review(
+            mock_update, mock_context, "git@github.com:owner/repo.git", 42
+        )
+
+    mock_update.message.reply_text.assert_called_once()
+    assert "PR review failed" in mock_update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_empty_output(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    clone_process = AsyncMock()
+    clone_process.returncode = 0
+    clone_process.communicate.return_value = (b"", b"")
+    checkout_process = AsyncMock()
+    checkout_process.returncode = 0
+    checkout_process.communicate.return_value = (b"", b"")
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[clone_process, checkout_process]), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "run_command_and_stream", return_value=(0, "   ", "")):
+        await telegram_listener.run_pr_review(
+            mock_update, mock_context, "git@github.com:owner/repo.git", 42
+        )
+
+    mock_update.message.reply_text.assert_called_once()
+    assert "returned no output" in mock_update.message.reply_text.call_args[0][0]
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_handles_exception(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    with patch("os.path.exists", side_effect=RuntimeError("boom")):
+        await telegram_listener.run_pr_review(
+            mock_update, mock_context, "git@github.com:owner/repo.git", 42
+        )
+
+    mock_update.message.reply_text.assert_called_once()
+    assert "PR review error" in mock_update.message.reply_text.call_args[0][0]
 

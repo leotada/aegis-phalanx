@@ -7,6 +7,7 @@ from agents.adapters.claude import ClaudeCodeAgentCLI
 from agents.adapters.cursor import CursorAgentCLI
 from agents.auth.cursor import CursorAuthResolver
 from agents.pipeline import PIPELINE_CONFIG, resolve_pipeline_config
+from agents.review_pipeline import PR_REVIEW_CONFIG, resolve_review_pipeline_config
 from agents.registry import AgentRegistry as RegistryClass
 from agents.tool_specs import get_registered_tools, validate_tool
 from telegram_listener import classify_intent, get_model_quota_summary
@@ -134,6 +135,20 @@ def test_resolve_pipeline_config_preserves_step_metadata():
     assert step["step_name"] == "Architect (Planning - PLAN)"
     assert step["model"] == "gemini-3.1-pro"
     assert "{demand}" in step["prompt"]
+
+
+def test_resolve_review_pipeline_config_explicit_tool():
+    resolved = resolve_review_pipeline_config("claude")
+    assert len(resolved) == 1
+    assert resolved[0]["tool"] == "claude"
+    assert resolved[0]["step_name"] == "PR Reviewer"
+    assert "{pr_number}" in resolved[0]["prompt"]
+
+
+def test_resolve_review_pipeline_config_deep_copies_steps():
+    resolved = resolve_review_pipeline_config("agy")
+    resolved[0]["tool"] = "mutated"
+    assert PR_REVIEW_CONFIG[0]["tool"] == "agy"
 
 
 # --- validate_tool ---
