@@ -332,6 +332,7 @@ def test_build_application():
         app = build_application()
         assert app is not None
         assert app.post_init is not None
+        assert app.concurrent_updates > 1
     finally:
         del os.environ["TELEGRAM_BOT_TOKEN"]
 
@@ -1289,4 +1290,191 @@ async def test_run_pr_review_uses_cursor_ask_mode(monkeypatch):
     assert "--mode" in captured_command
     assert captured_command[captured_command.index("--mode") + 1] == "ask"
     assert "--force" not in captured_command
+
+
+def test_terminate_process_tree_sends_sigterm():
+    from unittest.mock import MagicMock, patch
+    import signal
+    import telegram_listener
+
+    mock_process = MagicMock()
+    mock_process.pid = 4242
+
+    with patch("telegram_listener.os.getpgid", return_value=4242) as mock_getpgid, \
+         patch("telegram_listener.os.killpg") as mock_killpg:
+        telegram_listener._terminate_process_tree(mock_process)
+
+    mock_getpgid.assert_called_once_with(4242)
+    mock_killpg.assert_called_once_with(4242, signal.SIGTERM)
+
+
+def test_terminate_process_tree_sends_sigkill_when_forced():
+    from unittest.mock import MagicMock, patch
+    import signal
+    import telegram_listener
+
+    mock_process = MagicMock()
+    mock_process.pid = 4242
+
+    with patch("telegram_listener.os.getpgid", return_value=4242), \
+         patch("telegram_listener.os.killpg") as mock_killpg:
+        telegram_listener._terminate_process_tree(mock_process, force=True)
+
+    mock_killpg.assert_called_once_with(4242, signal.SIGKILL)
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_registers_and_clears_active_task(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    telegram_listener.ACTIVE_TASKS.clear()
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"", b"")
+
+    review_output = "Review complete."
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "fetch_pr_context", new_callable=AsyncMock, return_value="PR context"), \
+         patch.object(telegram_listener, "run_command_and_stream", return_value=(0, review_output, "")):
+        await telegram_listener.run_pr_review(
+            mock_update, mock_context, "git@github.com:owner/repo.git", 42
+        )
+
+    assert "12345" not in telegram_listener.ACTIVE_TASKS
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_cancelled_during_clone(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    telegram_listener.ACTIVE_TASKS.clear()
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    clone_process = AsyncMock()
+
+    async def slow_communicate():
+        await asyncio.sleep(3600)
+        return b"", b""
+
+    clone_process.communicate = slow_communicate
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("asyncio.create_subprocess_exec", return_value=clone_process), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "_terminate_process_tree") as mock_terminate:
+        task = asyncio.create_task(
+            telegram_listener.run_pr_review(
+                mock_update, mock_context, "git@github.com:owner/repo.git", 42
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    mock_terminate.assert_called()
+    calls = [str(call) for call in mock_update.message.reply_text.call_args_list]
+    assert any("PR review stopped" in call for call in calls)
+    assert "12345" not in telegram_listener.ACTIVE_TASKS
+
+
+@pytest.mark.anyio
+async def test_handle_continue_rejects_when_pipeline_active():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    mock_task = MagicMock()
+    mock_task.done.return_value = False
+    telegram_listener.ACTIVE_TASKS["12345"] = mock_task
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.run_pipeline", new_callable=AsyncMock) as mock_run:
+        await telegram_listener.handle_continue(mock_update, mock_context)
+
+    mock_run.assert_not_called()
+    mock_update.message.reply_text.assert_called_once()
+    assert "/stop" in mock_update.message.reply_text.call_args[0][0]
+
+    telegram_listener.ACTIVE_TASKS.clear()
+
+
+@pytest.mark.anyio
+async def test_handle_review_rejects_when_pipeline_active():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.text = "/review owner/repo#42"
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    mock_task = MagicMock()
+    mock_task.done.return_value = False
+    telegram_listener.ACTIVE_TASKS["12345"] = mock_task
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.run_pr_review", new_callable=AsyncMock) as mock_run:
+        await telegram_listener.handle_review(mock_update, mock_context)
+
+    mock_run.assert_not_called()
+    mock_update.message.reply_text.assert_called_once()
+    assert "/stop" in mock_update.message.reply_text.call_args[0][0]
+
+    telegram_listener.ACTIVE_TASKS.clear()
+
+
+@pytest.mark.anyio
+async def test_handle_demand_rejects_new_pipeline_when_active():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.text = "owner/repo: add feature"
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    mock_task = MagicMock()
+    mock_task.done.return_value = False
+    telegram_listener.ACTIVE_TASKS["12345"] = mock_task
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.classify_intent", new_callable=AsyncMock, return_value="NEW_DEMAND"), \
+         patch("telegram_listener.run_pipeline", new_callable=AsyncMock) as mock_run:
+        await telegram_listener.handle_demand(mock_update, mock_context)
+
+    mock_run.assert_not_called()
+    mock_update.message.reply_text.assert_called_once()
+    assert "/stop" in mock_update.message.reply_text.call_args[0][0]
+
+    telegram_listener.ACTIVE_TASKS.clear()
 

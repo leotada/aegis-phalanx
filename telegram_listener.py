@@ -1,9 +1,11 @@
 import os
 import asyncio
+import contextlib
 import html
 import re
 import shutil
 import subprocess
+import signal
 import json
 import select
 import struct
@@ -265,6 +267,24 @@ AGY_SCRATCH_DIR = "/root/.gemini/antigravity-cli/scratch"
 AGY_QUOTA_TIMEOUT = int(os.environ.get("AGY_QUOTA_TIMEOUT", "45"))
 ACTIVE_TASKS = {}
 
+PIPELINE_BUSY_MSG = (
+    "⚠️ A pipeline is already running. Send <code>/stop</code> first, then try again."
+)
+
+
+def _is_pipeline_active(chat_id: str) -> bool:
+    task = ACTIVE_TASKS.get(chat_id)
+    return task is not None and not task.done()
+
+
+async def _reject_if_pipeline_active(update: Update) -> bool:
+    """Returns True when a pipeline is already running and the request was rejected."""
+    chat_id = str(update.effective_chat.id)
+    if _is_pipeline_active(chat_id):
+        await update.message.reply_text(PIPELINE_BUSY_MSG, parse_mode="HTML")
+        return True
+    return False
+
 
 def save_session(repo_url: str, demand: str, last_completed_step: str, steps_status: dict, git_branch: str, session_file_path: str = SESSION_FILE_PATH) -> None:
     """Saves the current pipeline session metadata to a JSON file."""
@@ -365,12 +385,79 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 ALLOWED_CHAT_ID = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
 
+def _terminate_process_tree(process, force: bool = False) -> None:
+    """Signals the process (and its process group) with SIGTERM or SIGKILL.
+
+    The child is started with start_new_session=True, so its PID is also its
+    process-group id. Signaling the group ensures grandchildren spawned by the
+    agent CLI are stopped too, not just the immediate child.
+    """
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    try:
+        os.killpg(os.getpgid(process.pid), sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+    except Exception:
+        try:
+            if force:
+                process.kill()
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            pass
+
+
+async def _wait_or_cancel(process) -> int:
+    """Waits for a subprocess, terminating its process tree if the task is cancelled."""
+    try:
+        return await process.wait()
+    except asyncio.CancelledError:
+        _terminate_process_tree(process)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            _terminate_process_tree(process, force=True)
+            try:
+                await process.wait()
+            except ProcessLookupError:
+                pass
+        except ProcessLookupError:
+            pass
+        raise
+
+
+async def _communicate_or_cancel(process) -> tuple[bytes, bytes]:
+    """Runs process.communicate(), terminating the process tree on cancellation."""
+    communicate_task = asyncio.create_task(process.communicate())
+    try:
+        return await communicate_task
+    except asyncio.CancelledError:
+        _terminate_process_tree(process)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            _terminate_process_tree(process, force=True)
+            try:
+                await process.wait()
+            except ProcessLookupError:
+                pass
+        except ProcessLookupError:
+            pass
+        communicate_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await communicate_task
+        raise
+
+
 async def run_command_and_stream(command: List[str], cwd: str = "/workspace") -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=cwd
+        cwd=cwd,
+        # Run the child in its own process group so that on cancellation we can
+        # signal the whole tree (agent CLIs frequently spawn their own children).
+        start_new_session=True,
     )
     
     stdout_chunks = []
@@ -392,13 +479,15 @@ async def run_command_and_stream(command: List[str], cwd: str = "/workspace") ->
         )
         returncode = await process.wait()
     except asyncio.CancelledError:
+        _terminate_process_tree(process)
         try:
-            process.terminate()
+            await asyncio.wait_for(process.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            _terminate_process_tree(process, force=True)
             try:
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                process.kill()
                 await process.wait()
+            except ProcessLookupError:
+                pass
         except ProcessLookupError:
             pass
         raise
@@ -919,29 +1008,37 @@ async def fetch_pr_context(
 
 async def run_pr_review(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_url: str, pr_number: int):
     """Clones a repo, runs a single PR review step, and returns only the review text."""
+    chat_id = str(update.effective_chat.id)
+    current_task = asyncio.current_task()
+    ACTIVE_TASKS[chat_id] = current_task
+
     project_dir = "/workspace/project"
     repo_owner_name = extract_owner_repo(repo_url) or repo_url
     github_token = os.environ.get("GITHUB_TOKEN")
     review_config = resolve_review_pipeline_config()
     step = review_config[0]
 
-    # Resolve credentials for cloning: GITHUB_TOKEN -> gh CLI -> SSH key
-    auth_repo_url, auth_method, auth_error = await resolve_clone_url(repo_url, github_token)
-    if auth_error:
-        await update.message.reply_text(f"❌ Error: {auth_error}", parse_mode="HTML")
-        return
-
     try:
+        # Resolve credentials for cloning: GITHUB_TOKEN -> gh CLI -> SSH key
+        auth_repo_url, auth_method, auth_error = await resolve_clone_url(repo_url, github_token)
+        if auth_error:
+            await update.message.reply_text(f"❌ Error: {auth_error}", parse_mode="HTML")
+            return
+
         if os.path.exists(project_dir):
-            proc = await asyncio.create_subprocess_exec("rm", "-rf", project_dir)
-            await proc.wait()
+            proc = await asyncio.create_subprocess_exec(
+                "rm", "-rf", project_dir,
+                start_new_session=True,
+            )
+            await _wait_or_cancel(proc)
 
         clone_proc = await asyncio.create_subprocess_exec(
             "git", "clone", auth_repo_url, project_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-        _, stderr_c = await clone_proc.communicate()
+        _, stderr_c = await _communicate_or_cancel(clone_proc)
         if clone_proc.returncode != 0:
             err = stderr_c.decode("utf-8", errors="replace")[:800]
             await update.message.reply_text(
@@ -955,8 +1052,9 @@ async def run_pr_review(update: Update, context: ContextTypes.DEFAULT_TYPE, repo
             cwd=project_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-        _, checkout_err = await checkout_proc.communicate()
+        _, checkout_err = await _communicate_or_cancel(checkout_proc)
         if checkout_proc.returncode != 0:
             err = checkout_err.decode("utf-8", errors="replace")[:800]
             await update.message.reply_text(
@@ -998,8 +1096,17 @@ async def run_pr_review(update: Update, context: ContextTypes.DEFAULT_TYPE, repo
 
         await _send_review_text(update, review_text)
 
+    except asyncio.CancelledError:
+        await update.message.reply_text(
+            "🛑 <b>PR review stopped.</b>",
+            parse_mode="HTML",
+        )
+        raise
     except Exception as e:
         await update.message.reply_text(f"❌ PR review error: {html.escape(str(e))}", parse_mode="HTML")
+    finally:
+        if ACTIVE_TASKS.get(chat_id) == current_task:
+            ACTIVE_TASKS.pop(chat_id, None)
 
 def _inline_markdown_to_html(text: str) -> str:
     """Converts inline Markdown (bold, italic, code, links, headings) to Telegram HTML."""
@@ -1161,6 +1268,8 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
     intent = await classify_intent(raw_demand)
     
     if intent == "RESUME":
+        if await _reject_if_pipeline_active(update):
+            return
         await run_pipeline(update, context, None, None, is_resume=True)
     elif intent == "QUERY_STATUS":
         await send_status(update)
@@ -1176,12 +1285,17 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ Error: No repository specified. Please prefix your demand with your repository (e.g. `owner/repo: my demand`) or configure `DEFAULT_REPO` in .env."
             )
             return
+
+        if await _reject_if_pipeline_active(update):
+            return
             
         await run_pipeline(update, context, repo_url, demand, is_resume=False)
 
 async def handle_continue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     if chat_id != ALLOWED_CHAT_ID:
+        return
+    if await _reject_if_pipeline_active(update):
         return
     await run_pipeline(update, context, None, None, is_resume=True)
 
@@ -1224,6 +1338,9 @@ async def handle_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<code>https://github.com/owner/repo/pull/123</code>, or <code>/review 123</code> with DEFAULT_REPO set.",
             parse_mode="HTML",
         )
+        return
+
+    if await _reject_if_pipeline_active(update):
         return
 
     await run_pr_review(update, context, repo_url, pr_number)
@@ -1294,7 +1411,11 @@ def build_application() -> Application:
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN is not defined in environment variables.")
         
-    app = ApplicationBuilder().token(token).post_init(post_init).build()
+    # concurrent_updates(True) is required so that commands like /stop are
+    # processed while a long-running pipeline is still executing. Without it,
+    # python-telegram-bot handles updates sequentially and /stop would be queued
+    # behind the running pipeline, never firing task.cancel() mid-run.
+    app = ApplicationBuilder().token(token).concurrent_updates(True).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("continue", handle_continue))
     app.add_handler(CommandHandler("status", handle_status))
