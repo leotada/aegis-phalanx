@@ -23,7 +23,7 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
   |------|-------------|------------------|
   | `agy` | `agy --model "Gemini … (Budget)"` | Per-step model and reasoning from the pipeline |
   | `cursor` | `agent -p … --model auto --trust --force` | Always `auto`; pipeline model/reasoning ignored |
-  | `claude` | `claude -p … -y` | Pipeline model/reasoning ignored |
+  | `claude` | `claude --print --model … --effort …` | Gemini slugs mapped to Claude aliases; reasoning → `--effort` |
   | `aider` | `aider --model … --message …` | Per-step `model` passed to `--model`; reasoning ignored |
 
 ---
@@ -64,7 +64,7 @@ Changing `AGENT_TOOL` requires a rebuild: `make build`.
 | `AGENT_TOOL` | Authentication | Session paths mounted into the container |
 |--------------|----------------|----------------------------------------|
 | `agy` | `agy login` on the host | `~/.config/antigravity`, `~/.gemini/*`, `~/.antigravity` |
-| `claude` | `claude auth login` on the host | `~/.config/claude` |
+| `claude` | `claude auth login` on the host | `~/.claude`, `~/.claude.json` |
 | `cursor` | `CURSOR_API_KEY` in `.env` **or** `agent login` on the host | `~/.cursor`, `~/.config/Cursor` |
 | `aider` | API keys in `.env` (provider-specific) | — |
 
@@ -103,6 +103,17 @@ Verify inside the running container:
 ```bash
 podman exec agent_workspace agent --print "say hi" --model auto --trust --force
 ```
+
+#### Using Claude Code (`AGENT_TOOL=claude`)
+
+1. Install and log in on the host (credentials are bind-mounted into the container):
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   claude auth login
+   ```
+2. Set `AGENT_TOOL=claude` in `.env` and run `make build`.
+
+The pipeline invokes `claude --print --model <alias> --effort <budget> --dangerously-skip-permissions "<prompt>"`. Gemini pipeline slugs map to Claude aliases (`gemini-3.1-pro` → `opus`, `gemini-3.5-flash` → `sonnet`); `reasoning_budget` maps to `--effort`. PR reviews use `--permission-mode plan` instead of `--dangerously-skip-permissions`.
 
 ### 3. Configure SSH key authentication (optional)
 
@@ -250,7 +261,7 @@ Supported reference formats:
 |------|-------------------|-------|
 | `agy` | `agy --model "Gemini 3.5 Flash (High)" …` | Per-step model and reasoning from `agents/review_pipeline.py` |
 | `cursor` | `agent --print --mode ask --model auto --trust "<prompt>"` | Read-only ask mode; PR context is pre-fetched so the agent does not need `gh` |
-| `claude` | `claude -p … -y` | Pipeline model/reasoning ignored |
+| `claude` | `claude --print --permission-mode plan --model … --effort …` | Read-only plan mode; Gemini slugs mapped to Claude aliases |
 | `aider` | `aider --model … --message …` | Per-step `model` passed to `--model` |
 
 The review text is returned to Telegram only — no commits, file changes, or GitHub comments.

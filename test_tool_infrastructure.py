@@ -34,8 +34,14 @@ def test_get_volume_mounts_include_shared_and_tool_specific():
 def test_get_volume_mounts_claude_only_has_claude_sessions():
     mounts = get_volume_mounts("claude")
     hosts = [host for host, _ in mounts]
-    assert "~/.config/claude" in hosts
+    assert "~/.claude" in hosts
+    assert "~/.claude.json" in hosts
+    assert "~/.config/claude" not in hosts
     assert "~/.config/antigravity" not in hosts
+
+
+def test_claude_spec_has_no_optional_env_vars():
+    assert get_tool_spec("claude").optional_env_vars == ()
 
 
 def test_aider_spec_has_no_extra_volume_mounts():
@@ -62,7 +68,7 @@ def test_all_specs_define_install_commands():
 
 @pytest.mark.parametrize("tool,expected_host", [
     ("agy", "~/.config/antigravity"),
-    ("claude", "~/.config/claude"),
+    ("claude", "~/.claude"),
     ("cursor", "~/.cursor"),
 ])
 def test_render_compose_overlay_includes_tool_mounts(tool, expected_host, monkeypatch):

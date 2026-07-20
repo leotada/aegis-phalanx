@@ -38,7 +38,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
             "npm install -g @anthropic-ai/claude-code",
         ),
         volume_mounts=(
-            ("~/.config/claude", "/root/.config/claude"),
+            ("~/.claude", "/root/.claude"),
+            ("~/.claude.json", "/root/.claude.json"),
         ),
     ),
     "cursor": ToolSpec(

@@ -45,8 +45,39 @@ def test_registry_register_and_resolve():
 
 
 def test_claude_cli_build_command():
-    cmd = ClaudeCodeAgentCLI().build_command("Fix tests", "claude-sonnet", "high")
-    assert cmd == ["claude", "-p", "Fix tests", "-y"]
+    cmd = ClaudeCodeAgentCLI().build_command("Fix tests", "gemini-3.5-flash", "high")
+    assert cmd == [
+        "claude",
+        "--print",
+        "--model", "sonnet",
+        "--effort", "high",
+        "--dangerously-skip-permissions",
+        "Fix tests",
+    ]
+
+
+def test_claude_cli_maps_pro_model_and_passes_claude_alias():
+    cli = ClaudeCodeAgentCLI()
+    pro_cmd = cli.build_command("Plan", "gemini-3.1-pro", "medium")
+    assert pro_cmd[pro_cmd.index("--model") + 1] == "opus"
+
+    alias_cmd = cli.build_command("Plan", "sonnet", "low")
+    assert alias_cmd[alias_cmd.index("--model") + 1] == "sonnet"
+
+
+def test_claude_cli_read_only_uses_plan_permission_mode():
+    cmd = ClaudeCodeAgentCLI().build_command(
+        "Review prompt", "gemini-3.5-flash", "high", read_only=True
+    )
+    assert "--permission-mode" in cmd
+    assert cmd[cmd.index("--permission-mode") + 1] == "plan"
+    assert "--dangerously-skip-permissions" not in cmd
+    assert cmd[-1] == "Review prompt"
+
+
+def test_claude_cli_falls_back_on_unknown_effort():
+    cmd = ClaudeCodeAgentCLI().build_command("Fix", "opus", "ultra")
+    assert cmd[cmd.index("--effort") + 1] == "medium"
 
 
 def test_aider_cli_build_command():
