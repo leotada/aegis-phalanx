@@ -61,6 +61,12 @@ def test_claude_cli_maps_pro_model_and_passes_claude_alias():
     pro_cmd = cli.build_command("Plan", "gemini-3.1-pro", "medium")
     assert pro_cmd[pro_cmd.index("--model") + 1] == "opus"
 
+    pro37_cmd = cli.build_command("Plan", "gemini-3.7-pro", "medium")
+    assert pro37_cmd[pro37_cmd.index("--model") + 1] == "opus"
+
+    flash37_cmd = cli.build_command("Plan", "gemini-3.7-flash", "low")
+    assert flash37_cmd[flash37_cmd.index("--model") + 1] == "sonnet"
+
     alias_cmd = cli.build_command("Plan", "sonnet", "low")
     assert alias_cmd[alias_cmd.index("--model") + 1] == "sonnet"
 
@@ -95,9 +101,13 @@ def test_agy_cli_maps_model_slugs():
     from agents.adapters.agy import AntigravityAgentCLI
 
     cli = AntigravityAgentCLI()
-    cmd = cli.build_command("Plan", "gemini-3.1-pro", "high")
-    assert "Gemini 3.1 Pro (High)" in cmd
-    assert cmd[0] == "agy"
+    cmd_pro = cli.build_command("Plan", "gemini-3.7-pro", "high")
+    assert "Gemini 3.7 Pro (High)" in cmd_pro
+    assert cmd_pro[0] == "agy"
+
+    cmd_flash = cli.build_command("Code", "gemini-3.7-flash", "medium")
+    assert "Gemini 3.7 Flash (Medium)" in cmd_flash
+    assert cmd_flash[0] == "agy"
 
 
 def test_agy_cli_passes_through_unknown_model_slug():
@@ -162,10 +172,17 @@ def test_resolve_pipeline_config_deep_copies_steps():
 
 def test_resolve_pipeline_config_preserves_step_metadata():
     resolved = resolve_pipeline_config("cursor")
-    step = resolved[0]
-    assert step["step_name"] == "Architect (Planning - PLAN)"
-    assert step["model"] == "gemini-3.1-pro"
-    assert "{demand}" in step["prompt"]
+    step0 = resolved[0]
+    assert step0["step_name"] == "Architect (Planning - PLAN)"
+    assert step0["model"] == "gemini-3.7-flash"
+    assert "{demand}" in step0["prompt"]
+
+    step1 = resolved[1]
+    assert step1["step_name"] == "Architect Reviewer (Plan Validation - PLAN)"
+    assert step1["model"] == "gemini-3.1-pro"
+    assert step1["reasoning_budget"] == "high"
+    assert "architect_plan.md" in step1["prompt"]
+    assert "architect_abort.txt" in step1["prompt"]
 
 
 def test_resolve_review_pipeline_config_explicit_tool():
@@ -212,7 +229,7 @@ async def test_classify_intent_uses_agy_when_configured():
         assert result == "RESUME"
         cmd = mock_exec.call_args[0]
         assert cmd[0] == "agy"
-        assert "Gemini 3.5 Flash (Low)" in cmd
+        assert "Gemini 3.7 Flash (Low)" in cmd
 
 
 @pytest.mark.anyio
@@ -228,7 +245,7 @@ async def test_classify_intent_uses_cursor_when_configured():
         cmd = mock_exec.call_args[0]
         assert cmd[0] == "agent"
         assert "--model" in cmd
-        assert cmd[cmd.index("--model") + 1] == "auto"
+        assert cmd[cmd.index("--model") + 1] == "cursor-grok-4.5-high"
 
 
 def test_get_model_quota_summary_empty_when_tool_has_no_quota():

@@ -9,20 +9,21 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
 - **TDD Workflow**: Enforces tests first — production code is only added to satisfy failing tests (Red-Green-Refactor).
 - **Pluggable Agent CLI**: Select the tool via `AGENT_TOOL` in `.env`. The image installs only that CLI; volume mounts and auth are generated automatically.
 - **Flexible Git Authentication**: HTTPS cloning (`GITHUB_TOKEN`) or SSH cloning (dedicated key mounted read-only into the container).
-- **Multi-Model Orchestration**: Six specialized steps defined in `agents/pipeline.py`. `AGENT_TOOL` selects one CLI for the entire run; per-step `model` and `reasoning_budget` from the config are passed to each adapter (adapters may ignore them).
-  1. **Architect** (Planning — PLAN): `gemini-3.1-pro`, high reasoning, 5m timeout.
-  2. **Test Developer** (Testing — RED): `gemini-3.5-flash`, medium reasoning, 10m timeout.
-  3. **Developer** (Implementation — GREEN): `gemini-3.5-flash`, medium reasoning, 10m timeout.
-  4. **Code Reviewer** (Review — PLAN): `gemini-3.5-flash`, high reasoning, 10m timeout.
-  5. **Refactoring Developer** (Refactoring — REFACTOR): `gemini-3.5-flash`, medium reasoning, 10m timeout.
-  6. **GitOps** (Documentation and PR): `gemini-3.5-flash`, low reasoning.
+- **Multi-Model Orchestration**: Seven specialized steps defined in `agents/pipeline.py`. `AGENT_TOOL` selects one CLI for the entire run; per-step `model` and `reasoning_budget` from the config are passed to each adapter (adapters may ignore them).
+  1. **Architect** (Planning — PLAN): `gemini-3.7-flash`, high reasoning, 5m timeout.
+  2. **Architect Reviewer** (Plan Validation — PLAN): `gemini-3.1-pro`, high reasoning, 5m timeout. Validates the plan; aborts the pipeline if flawed or appends notes/observations in append-only mode.
+  3. **Test Developer** (Testing — RED): `gemini-3.7-flash`, medium reasoning, 10m timeout.
+  4. **Developer** (Implementation — GREEN): `gemini-3.7-flash`, medium reasoning, 10m timeout.
+  5. **Code Reviewer** (Review — PLAN): `gemini-3.7-flash`, high reasoning, 10m timeout.
+  6. **Refactoring Developer** (Refactoring — REFACTOR): `gemini-3.7-flash`, medium reasoning, 10m timeout.
+  7. **GitOps** (Documentation and PR): `gemini-3.7-flash`, low reasoning.
 
   How each `AGENT_TOOL` uses the config above:
 
   | Tool | CLI invoked | Models / reasoning |
   |------|-------------|------------------|
   | `agy` | `agy --model "Gemini … (Budget)"` | Per-step model and reasoning from the pipeline |
-  | `cursor` | `agent -p … --model auto --trust --force` | Always `auto`; pipeline model/reasoning ignored |
+  | `cursor` | `agent -p … --model cursor-grok-4.5-high --trust --force` | Always `cursor-grok-4.5-high`; pipeline model/reasoning ignored |
   | `claude` | `claude --print --model … --effort …` | Gemini slugs mapped to Claude aliases; reasoning → `--effort` |
   | `aider` | `aider --model … --message …` | Per-step `model` passed to `--model`; reasoning ignored |
 
@@ -96,12 +97,12 @@ No Cursor CLI required on the host. Works with an active Cursor subscription.
    ```
 2. Set `AGENT_TOOL=cursor` in `.env` and run `make build`.
 
-The pipeline invokes `agent --print "<prompt>" --model auto --trust --force`. Pipeline model/reasoning fields are ignored for Cursor. PR reviews use `--mode ask` instead of `--force` (see [PR review](#pr-review-review)).
+The pipeline invokes `agent --print "<prompt>" --model cursor-grok-4.5-high --trust --force`. Pipeline model/reasoning fields are ignored for Cursor. PR reviews use `--mode ask` instead of `--force` (see [PR review](#pr-review-review)).
 
 Verify inside the running container:
 
 ```bash
-podman exec agent_workspace agent --print "say hi" --model auto --trust --force
+podman exec agent_workspace agent --print "say hi" --model cursor-grok-4.5-high --trust --force
 ```
 
 #### Using Claude Code (`AGENT_TOOL=claude`)
@@ -113,7 +114,7 @@ podman exec agent_workspace agent --print "say hi" --model auto --trust --force
    ```
 2. Set `AGENT_TOOL=claude` in `.env` and run `make build`.
 
-The pipeline invokes `claude --print --model <alias> --effort <budget> --dangerously-skip-permissions "<prompt>"`. Gemini pipeline slugs map to Claude aliases (`gemini-3.1-pro` → `opus`, `gemini-3.5-flash` → `sonnet`); `reasoning_budget` maps to `--effort`. PR reviews use `--permission-mode plan` instead of `--dangerously-skip-permissions`.
+The pipeline invokes `claude --print --model <alias> --effort <budget> --dangerously-skip-permissions "<prompt>"`. Gemini pipeline slugs map to Claude aliases (`gemini-3.7-pro`/`gemini-3.1-pro` → `opus`, `gemini-3.7-flash`/`gemini-3.5-flash` → `sonnet`); `reasoning_budget` maps to `--effort`. PR reviews use `--permission-mode plan` instead of `--dangerously-skip-permissions`.
 
 ### 3. Configure SSH key authentication (optional)
 
@@ -259,8 +260,8 @@ Supported reference formats:
 
 | Tool | Review invocation | Notes |
 |------|-------------------|-------|
-| `agy` | `agy --model "Gemini 3.5 Flash (High)" …` | Per-step model and reasoning from `agents/review_pipeline.py` |
-| `cursor` | `agent --print --mode ask --model auto --trust "<prompt>"` | Read-only ask mode; PR context is pre-fetched so the agent does not need `gh` |
+| `agy` | `agy --model "Gemini 3.7 Flash (High)" …` | Per-step model and reasoning from `agents/review_pipeline.py` |
+| `cursor` | `agent --print --mode ask --model cursor-grok-4.5-high --trust "<prompt>"` | Read-only ask mode; PR context is pre-fetched so the agent does not need `gh` |
 | `claude` | `claude --print --permission-mode plan --model … --effort …` | Read-only plan mode; Gemini slugs mapped to Claude aliases |
 | `aider` | `aider --model … --message …` | Per-step `model` passed to `--model` |
 

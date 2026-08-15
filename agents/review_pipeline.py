@@ -8,7 +8,7 @@ PR_REVIEW_CONFIG = [
     {
         "step_name": "PR Reviewer",
         "tool": "agy",
-        "model": "gemini-3.5-flash",
+        "model": "gemini-3.7-flash",
         "reasoning_budget": "high",
         "timeout": "10m",
         "prompt": (

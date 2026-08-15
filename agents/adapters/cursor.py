@@ -3,14 +3,14 @@ from typing import List
 from agents.auth.cursor import CursorAuthResolver
 from agents.base import AgentCLI
 
-CURSOR_DEFAULT_MODEL = "auto"
+CURSOR_DEFAULT_MODEL = "cursor-grok-4.5-high"
 
 
 class CursorAgentCLI(AgentCLI):
     """
     Adapter for the official Cursor CLI (`agent`).
 
-    Always uses model `auto` regardless of pipeline model/reasoning settings.
+    Always uses model `cursor-grok-4.5-high` regardless of pipeline model/reasoning settings.
     Auth is session-first via mounted host credentials; CURSOR_API_KEY is optional.
     PR reviews use `--mode ask` (read-only) instead of `--force`.
     """

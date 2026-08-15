@@ -18,6 +18,8 @@ class AntigravityAgentCLI(AgentCLI):
         model_map = {
             "gemini-3.1-pro": "Gemini 3.1 Pro",
             "gemini-3.5-flash": "Gemini 3.5 Flash",
+            "gemini-3.7-pro": "Gemini 3.7 Pro",
+            "gemini-3.7-flash": "Gemini 3.7 Flash",
         }
 
         base_name = model_map.get(model.lower(), model)

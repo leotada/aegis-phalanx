@@ -62,7 +62,7 @@ def test_cursor_cli_build_command(monkeypatch):
     assert "Test prompt" in cmd
     assert cmd.index("Test prompt") > cmd.index("--print")
     assert "--model" in cmd
-    assert cmd[cmd.index("--model") + 1] == "auto"
+    assert cmd[cmd.index("--model") + 1] == "cursor-grok-4.5-high"
     assert "--trust" in cmd
     assert "--force" in cmd
     assert "--mode" not in cmd
@@ -81,12 +81,12 @@ def test_cursor_cli_read_only_review_command(monkeypatch):
     assert "Review prompt" in cmd
 
 
-def test_cursor_cli_always_uses_auto_model(monkeypatch):
+def test_cursor_cli_always_uses_default_model(monkeypatch):
     monkeypatch.delenv("CURSOR_API_KEY", raising=False)
     cli = CursorAgentCLI()
     cmd = cli.build_command("Another prompt", "gemini-3.5-flash", "low")
 
-    assert cmd[cmd.index("--model") + 1] == "auto"
+    assert cmd[cmd.index("--model") + 1] == "cursor-grok-4.5-high"
 
 
 def test_cursor_auth_api_key_fallback(monkeypatch):
@@ -483,19 +483,20 @@ async def test_pipeline_reports_honestly_when_no_pr_url(monkeypatch):
 
 
 def test_pipeline_config_steps():
-    """Verify that PIPELINE_CONFIG has the split Architect steps, modified Code Reviewer step, and Refactoring Developer step."""
+    """Verify that PIPELINE_CONFIG has the Architect, Architect Reviewer, Test Developer, Developer, Code Reviewer, Refactoring Developer, and GitOps steps."""
     from agents.pipeline import PIPELINE_CONFIG
     
-    # Verify we have 6 steps now
-    assert len(PIPELINE_CONFIG) == 6
+    # Verify we have 7 steps now
+    assert len(PIPELINE_CONFIG) == 7
     
     step_names = [step["step_name"] for step in PIPELINE_CONFIG]
     assert step_names[0] == "Architect (Planning - PLAN)"
-    assert step_names[1] == "Test Developer (Testing - RED)"
-    assert step_names[2] == "Developer (Implementation - GREEN)"
-    assert step_names[3] == "Code Reviewer (Review - PLAN)"
-    assert step_names[4] == "Refactoring Developer (Refactoring - REFACTOR)"
-    assert step_names[5] == "GitOps (Documentation and PR)"
+    assert step_names[1] == "Architect Reviewer (Plan Validation - PLAN)"
+    assert step_names[2] == "Test Developer (Testing - RED)"
+    assert step_names[3] == "Developer (Implementation - GREEN)"
+    assert step_names[4] == "Code Reviewer (Review - PLAN)"
+    assert step_names[5] == "Refactoring Developer (Refactoring - REFACTOR)"
+    assert step_names[6] == "GitOps (Documentation and PR)"
     
     # Verify Architect prompt contents/expectations
     architect_prompt = PIPELINE_CONFIG[0]["prompt"]
@@ -503,30 +504,86 @@ def test_pipeline_config_steps():
     assert "Test Specification Plan" in architect_prompt
     assert "Implementation Plan" in architect_prompt
     
+    # Verify Architect Reviewer step configuration and prompt
+    assert PIPELINE_CONFIG[1]["model"] == "gemini-3.1-pro"
+    assert PIPELINE_CONFIG[1]["reasoning_budget"] == "high"
+    architect_reviewer_prompt = PIPELINE_CONFIG[1]["prompt"]
+    assert "architect_plan.md" in architect_reviewer_prompt
+    assert "architect_abort.txt" in architect_reviewer_prompt
+    assert "append-only" in architect_reviewer_prompt.lower() or "append" in architect_reviewer_prompt.lower()
+
     # Verify Test Developer prompt contents/expectations
-    test_developer_prompt = PIPELINE_CONFIG[1]["prompt"]
+    test_developer_prompt = PIPELINE_CONFIG[2]["prompt"]
     assert "architect_plan.md" in test_developer_prompt
     assert "Test Specification Plan" in test_developer_prompt
     assert "Do NOT delete" in test_developer_prompt
     
     # Verify Developer prompt contents/expectations
-    developer_prompt = PIPELINE_CONFIG[2]["prompt"]
+    developer_prompt = PIPELINE_CONFIG[3]["prompt"]
     assert "architect_plan.md" in developer_prompt
     assert "Implementation Plan" in developer_prompt
     assert "Do NOT delete" in developer_prompt
 
     # Verify Code Reviewer prompt contents/expectations
-    reviewer_prompt = PIPELINE_CONFIG[3]["prompt"]
+    reviewer_prompt = PIPELINE_CONFIG[4]["prompt"]
     assert "architect_plan.md" in reviewer_prompt
     assert "refactor_plan.md" in reviewer_prompt
     assert "Do NOT modify" in reviewer_prompt
     assert "delete the `architect_plan.md` file" in reviewer_prompt
     
     # Verify Refactoring Developer prompt contents/expectations
-    refactor_developer_prompt = PIPELINE_CONFIG[4]["prompt"]
+    refactor_developer_prompt = PIPELINE_CONFIG[5]["prompt"]
     assert "refactor_plan.md" in refactor_developer_prompt
     assert "Strictly follow" in refactor_developer_prompt
     assert "delete the `refactor_plan.md` file" in refactor_developer_prompt
+
+
+@pytest.mark.anyio
+async def test_pipeline_aborts_on_architect_review_failure(monkeypatch, tmp_path):
+    """Verify that if architect_abort.txt is created during architect review, pipeline aborts and alerts user."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate.return_value = (b"", b"")
+
+    executed_steps = []
+
+    async def fake_run_command_and_stream(command, cwd=None):
+        executed_steps.append(command)
+        # On the 2nd step (Architect Reviewer), write architect_abort.txt into the cwd
+        if len(executed_steps) == 2:
+            abort_file = os.path.join(cwd, "architect_abort.txt")
+            with open(abort_file, "w") as f:
+                f.write("The proposed architecture violates separation of concerns and is unfeasible.")
+        return (0, "Success", "")
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch.object(telegram_listener, "run_command_and_stream", side_effect=fake_run_command_and_stream), \
+         patch("telegram_listener.save_session") as mock_save:
+
+        # Point project_dir to tmp_path
+        with patch.object(os.path, "exists", return_value=True):
+            await telegram_listener.run_pipeline(
+                mock_update, mock_context,
+                "git@github.com:owner/repo.git", "test demand"
+            )
+
+    # Should have stopped after step 2
+    assert len(executed_steps) == 2
+
+    # Check reply messages
+    replies = [str(call) for call in mock_update.message.reply_text.call_args_list]
+    abort_reply = any("Aborted" in r or "aborted" in r for r in replies)
+    assert abort_reply, f"Expected abort reply in: {replies}"
 
 
 @pytest.mark.anyio

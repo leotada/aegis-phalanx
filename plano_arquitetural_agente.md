@@ -128,10 +128,13 @@ A estratégia central é fragmentar a tarefa em um pipeline simulando uma equipe
 Isso permite adicionar novas ferramentas agênticas (como Aider ou Mentat) no futuro simplesmente registrando uma nova classe concreta de adapter, sem modificar a lógica do orquestrador do Telegram.
 
 ### Papéis do Pipeline e Configuração de Raciocínio (Thinking)
-1. **Arquiteto (High Effort):** `gemini-3.1-pro` via CLI `agy` (com thinking level / reasoning budget alto) — Foca em planejar a arquitetura e escrever os testes (Fase RED).
-2. **Desenvolvedor (Fast Code):** `gemini-3.5-flash` via CLI `agy` (com thinking level médio) — Foca em codificar a solução rapidamente (Fase GREEN).
-3. **Revisor (High Effort):** `gemini-3.5-flash` via CLI `agy` (com thinking level alto) — Inspeciona segurança, complexidade ciclomática e clean code (Fase REFACTOR).
-4. **GitOps (Low Effort):** `gemini-3.5-flash` via CLI `agy` (com thinking level baixo) — Documenta o PR e interage com o GitHub CLI.
+1. **Arquiteto (High Effort):** `gemini-3.7-flash` via CLI `agy` (com thinking level / reasoning budget alto) — Foca em planejar a arquitetura (Fase PLAN).
+2. **Revisor do Arquiteto (High Effort):** `gemini-3.1-pro` via CLI `agy` (com thinking level / reasoning budget alto) — Valida a viabilidade do plano arquitetural. Se inválido, aborta a execução; se válido, adiciona observações em modo append-only.
+3. **Desenvolvedor de Testes (Medium Effort):** `gemini-3.7-flash` via CLI `agy` (com thinking level médio) — Escreve os testes para que falhem (Fase RED).
+4. **Desenvolvedor (Medium Effort):** `gemini-3.7-flash` via CLI `agy` (com thinking level médio) — Foca em codificar a solução (Fase GREEN).
+5. **Revisor de Código (High Effort):** `gemini-3.7-flash` via CLI `agy` (com thinking level alto) — Inspeciona segurança, complexidade ciclomática e clean code (Fase REFACTOR).
+6. **Desenvolvedor de Refatoração (Medium Effort):** `gemini-3.7-flash` via CLI `agy` (com thinking level médio) — Executa as correções do plano de refatoração.
+7. **GitOps (Low Effort):** `gemini-3.7-flash` via CLI `agy` (com thinking level baixo) — Documenta o PR e interage com o GitHub CLI.
 
 ---
 
@@ -235,32 +238,53 @@ AgentRegistry.register("aider", AiderAgentCLI)
 # Configuração declarativa e mutável do pipeline
 PIPELINE_CONFIG = [
     {
-        "step_name": "Arquiteto (Planejamento e Testes - RED)",
+        "step_name": "Arquiteto (Planejamento - PLAN)",
+        "tool": "agy",
+        "model": "gemini-3.7-flash",
+        "reasoning_budget": "high",
+        "prompt": "Crie uma nova branch git para a feature. Leia esta demanda: '{demand}'. Atue como Arquiteto de Software. Escreva o plano arquitetural detalhado e a especificação de testes em `architect_plan.md` na raiz do repositório. NÃO escreva código de produção ainda."
+    },
+    {
+        "step_name": "Revisor do Arquiteto (Validação - PLAN)",
         "tool": "agy",
         "model": "gemini-3.1-pro",
         "reasoning_budget": "high",
-        "prompt": "Crie uma nova branch git para a feature. Leia esta demanda: '{demand}'. Atue como Arquiteto de Software. Crie APENAS a suíte de testes (TDD RED Phase) para esta funcionalidade. Execute os testes via CLI e comprove que eles falham. NÃO escreva o código de produção ainda."
+        "prompt": "Leia a demanda: '{demand}' e o arquivo `architect_plan.md`. Atue como Arquiteto Principal validando o plano. Se o plano for inviável ou incorreto, crie `architect_abort.txt` com o motivo. Se for válido, adicione observações ao final de `architect_plan.md` em modo append-only."
+    },
+    {
+        "step_name": "Desenvolvedor de Testes (Testes - RED)",
+        "tool": "agy",
+        "model": "gemini-3.7-flash",
+        "reasoning_budget": "medium",
+        "prompt": "Leia `architect_plan.md`. Implemente a suíte de testes (TDD RED Phase). Execute os testes via CLI e comprove que eles falham. NÃO delete `architect_plan.md`."
     },
     {
         "step_name": "Desenvolvedor (Implementação - GREEN)",
         "tool": "agy",
-        "model": "gemini-3.5-flash",
+        "model": "gemini-3.7-flash",
         "reasoning_budget": "medium",
-        "prompt": "Leia os testes recém-criados que estão falhando. Escreva o código de produção mínimo e estritamente necessário para fazer os testes passarem (GREEN Phase). Rode os testes paralelamente até que tudo passe perfeitamente."
+        "prompt": "Leia os testes recém-criados que estão falhando. Escreva o código de produção mínimo e estritamente necessário para fazer os testes passarem (GREEN Phase). Rode os testes até que tudo passe perfeitamente."
     },
     {
         "step_name": "Revisor de Código (Refatoração - REFACTOR)",
         "tool": "agy",
-        "model": "gemini-3.5-flash",
+        "model": "gemini-3.7-flash",
         "reasoning_budget": "high",
-        "prompt": "Atue como Staff Engineer revisor. Analise as mudanças recentes. O princípio TDD foi respeitado? O código está limpo, sem code smells e seguro? Se não, refatore o código garantindo que a suíte de testes continue passando."
+        "prompt": "Atue como Staff Engineer revisor. Analise as mudanças recentes. Crie um plano em `refactor_plan.md` e delete `architect_plan.md`."
+    },
+    {
+        "step_name": "Desenvolvedor de Refatoração (Refatoração - REFACTOR)",
+        "tool": "agy",
+        "model": "gemini-3.7-flash",
+        "reasoning_budget": "medium",
+        "prompt": "Siga rigorosamente `refactor_plan.md`, garanta que os testes passem e delete `refactor_plan.md`."
     },
     {
         "step_name": "GitOps (Documentação e PR)",
         "tool": "agy",
-        "model": "gemini-3.5-flash",
+        "model": "gemini-3.7-flash",
         "reasoning_budget": "low",
-        "prompt": "Faça o commit de todas as alterações usando o padrão Conventional Commits. Faça o push da branch atual para origin. Use a ferramenta 'gh' (GitHub CLI) para abrir um Pull Request detalhando o que foi implementado e a cobertura dos testes."
+        "prompt": "Faça o commit de todas as alterações usando o padrão Conventional Commits. Faça o push da branch atual para origin."
     }
 ]
 
@@ -351,6 +375,6 @@ make db-up    # ou: podman compose --env-file .env -f compose.yml --profile db u
 1. O Podman inicializa o container `agent` (o banco só sobe se você tiver executado `make db-up`). O container `agent` sobe mapeando a sua pasta local de configurações (`~/.config`).
 2. Você envia pelo Telegram: *"Crie uma entidade Usuario e conecte ao banco usando SQLAlchemy. Valide o formato do email e escreva testes com Pytest provando que grava no banco e falha se o e-mail for inválido."*
 3. O bot intercepta a mensagem e dispara o pipeline sequencial de engenheiros.
-4. O `gemini-3.1-pro` (thinking high) é invocado através do CLI `agy` oficial utilizando as credenciais da sua conta Google ativa. Os passos seguintes rodam o `gemini-3.5-flash` sob diferentes níveis de raciocínio.
+4. O `gemini-3.7-flash` (thinking high) é invocado através do CLI `agy` oficial utilizando as credenciais da sua conta Google ativa. Os passos seguintes rodam o `gemini-3.7-flash` sob diferentes níveis de raciocínio.
 5. Seu Telegram envia uma notificação instantânea com o resultado e o link do PR no GitHub.
 6. Todos os arquivos são magicamente sincronizados e persistidos no seu host, prontos para a revisão manual se necessário.

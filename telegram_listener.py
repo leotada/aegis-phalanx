@@ -354,7 +354,7 @@ Respond with ONLY the classification label (RESUME, QUERY_STATUS, or NEW_DEMAND)
         agent_cli = AgentRegistry.get_agent(DEFAULT_AGENT_TOOL)
         cmd = agent_cli.build_command(
             prompt,
-            "gemini-3.5-flash",
+            "gemini-3.7-flash",
             "low",
             timeout=AGENT_INTENT_TIMEOUT,
         )
@@ -876,6 +876,28 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                     await update.message.reply_text(error_msg, parse_mode="HTML")
                     return
 
+                # Check for architect plan rejection / abort signal
+                abort_file_path = os.path.join(project_dir, "architect_abort.txt")
+                if os.path.exists(abort_file_path):
+                    try:
+                        with open(abort_file_path, "r", encoding="utf-8", errors="replace") as f:
+                            abort_reason = f.read().strip()
+                    except Exception:
+                        abort_reason = "Architectural review rejected the plan."
+                    try:
+                        os.remove(abort_file_path)
+                    except Exception:
+                        pass
+
+                    steps_status[step_name] = "aborted"
+                    save_session(repo_url, demand, step_name if idx == 0 else pipeline_config[idx-1]["step_name"], steps_status, git_branch)
+                    await update.message.reply_text(
+                        f"🚫 <b>Pipeline Aborted by Architect Review:</b>\n\n"
+                        f"<b>Reason:</b>\n<pre>{html.escape(abort_reason[:1500])}</pre>",
+                        parse_mode="HTML"
+                    )
+                    return
+
                 # Mark step as successful
                 steps_status[step_name] = "success"
                 save_session(repo_url, demand, step_name, steps_status, git_branch)
@@ -1385,7 +1407,7 @@ async def send_status(update: Update):
     for step in pipeline_config:
         step_name = step["step_name"]
         status = session.get("steps_status", {}).get(step_name, "pending")
-        icon = "✅" if status == "success" else "❌" if status == "failed" else "⏳"
+        icon = "✅" if status == "success" else "🚫" if status == "aborted" else "❌" if status == "failed" else "⏳"
         status_msg += f"{icon} {step_name}: <code>{status}</code>\n"
         
     await update.message.reply_text(status_msg, parse_mode="HTML")
