@@ -24,3 +24,7 @@ This document outlines the operational guidelines and rules that all AI agents o
 ## 5. Development environment
 * Use podman compose to manage the development environment (with space).
 * **Host isolation**: The Podman container must protect the host. Do not mount or expose host directories (e.g. the project workspace, home directory, or arbitrary paths). Only bind-mount the specific config or credential files the container needs to run (CLI auth, SSH keys, etc.), prefer `:ro` when read-only access is sufficient, and nothing else.
+
+## 6. External Packages and Dependencies
+* **No Unauthorized External Packages**: It is strictly forbidden to install or use any external packages (e.g., npm packages, third-party tools/libraries) or add them to the project without first asking and obtaining explicit approval from the human operator.
+* **Avoidance by Default**: As a general rule, adding new external dependencies should be avoided whenever possible.
