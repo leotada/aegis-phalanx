@@ -109,12 +109,30 @@ def test_agy_cli_maps_model_slugs():
     assert "Gemini 3.7 Flash (Medium)" in cmd_flash
     assert cmd_flash[0] == "agy"
 
+    cmd_flash36 = cli.build_command("Code", "gemini-3.6-flash", "low")
+    assert "Gemini 3.6 Flash (Low)" in cmd_flash36
+
+
+def test_agy_cli_read_only_preserves_dangerously_skip_permissions():
+    from agents.adapters.agy import AntigravityAgentCLI
+
+    cmd = AntigravityAgentCLI().build_command("Review", "gemini-3.7-flash", "high", read_only=True)
+    assert "--dangerously-skip-permissions" in cmd
+    assert "--mode" not in cmd
+
 
 def test_agy_cli_passes_through_unknown_model_slug():
     from agents.adapters.agy import AntigravityAgentCLI
 
     cmd = AntigravityAgentCLI().build_command("Plan", "custom-model", "low")
     assert "custom-model (Low)" in cmd
+
+
+def test_agy_cli_defaults_to_gemini_37_flash():
+    from agents.adapters.agy import AntigravityAgentCLI
+
+    cmd = AntigravityAgentCLI().build_command("Plan", None, None)
+    assert "Gemini 3.7 Flash (Medium)" in cmd
 
 
 # --- Cursor auth ---

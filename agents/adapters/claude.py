@@ -7,6 +7,7 @@ from agents.base import AgentCLI
 CLAUDE_MODEL_MAP = {
     "gemini-3.1-pro": "opus",
     "gemini-3.5-flash": "sonnet",
+    "gemini-3.6-flash": "sonnet",
     "gemini-3.7-pro": "opus",
     "gemini-3.7-flash": "sonnet",
 }
