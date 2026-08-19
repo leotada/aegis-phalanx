@@ -273,7 +273,7 @@ async def test_classify_intent_via_agy_success():
         assert res == "RESUME"
         mock_exec.assert_called_once()
         assert mock_exec.call_args[0][0] == "agy"
-        assert "Gemini 3.5 Flash (Low)" in mock_exec.call_args[0]
+        assert "Gemini 3.7 Flash (Low)" in mock_exec.call_args[0]
 
 @pytest.mark.anyio
 async def test_classify_intent_via_agy_failure_fallback():
@@ -556,26 +556,32 @@ async def test_pipeline_aborts_on_architect_review_failure(monkeypatch, tmp_path
     mock_process.communicate.return_value = (b"", b"")
 
     executed_steps = []
+    abort_exists = False
 
     async def fake_run_command_and_stream(command, cwd=None):
+        nonlocal abort_exists
         executed_steps.append(command)
-        # On the 2nd step (Architect Reviewer), write architect_abort.txt into the cwd
         if len(executed_steps) == 2:
-            abort_file = os.path.join(cwd, "architect_abort.txt")
-            with open(abort_file, "w") as f:
-                f.write("The proposed architecture violates separation of concerns and is unfeasible.")
+            abort_exists = True
         return (0, "Success", "")
+
+    orig_open = open
+    def fake_open(file, *args, **kwargs):
+        if "architect_abort" in str(file):
+            import io
+            return io.StringIO("The proposed architecture violates separation of concerns and is unfeasible.")
+        return orig_open(file, *args, **kwargs)
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
          patch.object(telegram_listener, "run_command_and_stream", side_effect=fake_run_command_and_stream), \
-         patch("telegram_listener.save_session") as mock_save:
-
-        # Point project_dir to tmp_path
-        with patch.object(os.path, "exists", return_value=True):
-            await telegram_listener.run_pipeline(
-                mock_update, mock_context,
-                "git@github.com:owner/repo.git", "test demand"
-            )
+         patch("telegram_listener.save_session") as mock_save, \
+         patch("builtins.open", side_effect=fake_open), \
+         patch("os.remove", return_value=None), \
+         patch.object(os.path, "exists", side_effect=lambda p: abort_exists if "architect_abort" in str(p) else True):
+        await telegram_listener.run_pipeline(
+            mock_update, mock_context,
+            "git@github.com:owner/repo.git", "test demand"
+        )
 
     # Should have stopped after step 2
     assert len(executed_steps) == 2
@@ -826,7 +832,7 @@ async def test_run_pipeline_cancellation(monkeypatch):
     assert args[0] == "https://github.com/owner/repo.git"
     assert args[1] == "test cancellation"
     assert args[2] == "Architect (Planning - PLAN)"
-    assert args[3]["Test Developer (Testing - RED)"] == "failed"
+    assert args[3]["Architect Reviewer (Plan Validation - PLAN)"] == "failed"
     
     calls = [str(call) for call in mock_update.message.reply_text.call_args_list]
     assert any("Pipeline stopped in step" in call for call in calls)
@@ -1357,7 +1363,8 @@ def test_terminate_process_tree_sends_sigterm():
     mock_process = MagicMock()
     mock_process.pid = 4242
 
-    with patch("telegram_listener.os.getpgid", return_value=4242) as mock_getpgid, \
+    with patch("telegram_listener.os.getpgrp", return_value=9999), \
+         patch("telegram_listener.os.getpgid", return_value=4242) as mock_getpgid, \
          patch("telegram_listener.os.killpg") as mock_killpg:
         telegram_listener._terminate_process_tree(mock_process)
 
@@ -1373,11 +1380,36 @@ def test_terminate_process_tree_sends_sigkill_when_forced():
     mock_process = MagicMock()
     mock_process.pid = 4242
 
-    with patch("telegram_listener.os.getpgid", return_value=4242), \
+    with patch("telegram_listener.os.getpgrp", return_value=9999), \
+         patch("telegram_listener.os.getpgid", return_value=4242), \
          patch("telegram_listener.os.killpg") as mock_killpg:
         telegram_listener._terminate_process_tree(mock_process, force=True)
 
     mock_killpg.assert_called_once_with(4242, signal.SIGKILL)
+
+
+def test_terminate_process_tree_falls_back_when_same_pgrp():
+    from unittest.mock import MagicMock, patch
+    import telegram_listener
+
+    mock_process = MagicMock()
+    mock_process.pid = 4242
+    mock_process.terminate = MagicMock()
+
+    with patch("telegram_listener.os.getpgrp", return_value=4242), \
+         patch("telegram_listener.os.getpgid", return_value=4242), \
+         patch("telegram_listener.os.killpg") as mock_killpg:
+        telegram_listener._terminate_process_tree(mock_process)
+
+    mock_killpg.assert_not_called()
+    mock_process.terminate.assert_called_once()
+
+
+def test_terminate_process_tree_ignores_invalid_pid():
+    import telegram_listener
+
+    telegram_listener._terminate_process_tree(None)
+    telegram_listener._terminate_process_tree("not_a_process")
 
 
 @pytest.mark.anyio

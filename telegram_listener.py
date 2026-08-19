@@ -392,18 +392,25 @@ def _terminate_process_tree(process, force: bool = False) -> None:
     process-group id. Signaling the group ensures grandchildren spawned by the
     agent CLI are stopped too, not just the immediate child.
     """
+    if not process or not hasattr(process, "pid") or not isinstance(process.pid, int) or process.pid <= 0:
+        return
     sig = signal.SIGKILL if force else signal.SIGTERM
     try:
-        os.killpg(os.getpgid(process.pid), sig)
-    except (ProcessLookupError, PermissionError):
-        pass
+        pgid = os.getpgid(process.pid)
+        if pgid == os.getpgrp() or pgid <= 0:
+            if force:
+                process.kill()
+            else:
+                process.terminate()
+            return
+        os.killpg(pgid, sig)
     except Exception:
         try:
             if force:
                 process.kill()
             else:
                 process.terminate()
-        except ProcessLookupError:
+        except (ProcessLookupError, AttributeError):
             pass
 
 

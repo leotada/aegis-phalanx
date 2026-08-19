@@ -115,6 +115,7 @@ async def test_run_command_and_stream_terminates_on_cancel():
     from telegram_listener import run_command_and_stream
 
     mock_process = AsyncMock()
+    mock_process.pid = 4242
     mock_process.stdout = _StreamReader([])
     mock_process.stderr = _StreamReader([])
     mock_process.terminate = MagicMock()
@@ -147,6 +148,7 @@ async def test_run_command_and_stream_process_lookup_error_on_terminate():
     from telegram_listener import run_command_and_stream
 
     mock_process = MagicMock()
+    mock_process.pid = 4242
     mock_process.stdout = _BlockingStreamReader()
     mock_process.stderr = _BlockingStreamReader()
     mock_process.terminate = MagicMock(side_effect=ProcessLookupError)
@@ -165,6 +167,7 @@ async def test_run_command_and_stream_kill_after_terminate_timeout():
     from telegram_listener import run_command_and_stream
 
     mock_process = MagicMock()
+    mock_process.pid = 4242
     mock_process.stdout = _BlockingStreamReader()
     mock_process.stderr = _BlockingStreamReader()
     mock_process.terminate = MagicMock()
@@ -583,9 +586,10 @@ async def test_run_pipeline_missing_github_token_for_https(monkeypatch):
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     mock_update = _mock_update()
-    await telegram_listener.run_pipeline(
-        mock_update, MagicMock(), "https://github.com/o/r.git", "demand", is_resume=False
-    )
+    with patch("telegram_listener.resolve_clone_url", return_value=(None, None, "Neither GITHUB_TOKEN nor valid SSH keys were found.")):
+        await telegram_listener.run_pipeline(
+            mock_update, MagicMock(), "https://github.com/o/r.git", "demand", is_resume=False
+        )
     assert "GITHUB_TOKEN" in mock_update.message.reply_text.call_args_list[-1][0][0]
 
 
