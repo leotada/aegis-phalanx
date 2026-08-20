@@ -1092,3 +1092,394 @@ def test_main_entrypoint_exits_without_tokens(monkeypatch):
             run_name="__main__",
         )
     assert exc.value.code == 1
+
+
+def test_render_compose_overlay_load_env_nonexistent(tmp_path):
+    from scripts import render_compose_overlay
+    render_compose_overlay.load_env_file(tmp_path / "nonexistent.env")
+
+
+@pytest.mark.anyio
+async def test_gh_auth_token_coverage(monkeypatch):
+    from telegram_listener import _gh_auth_token
+    import shutil
+
+    # Case 1: gh not in path
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    assert await _gh_auth_token() is None
+
+    # Case 2: gh in path, subprocess raises
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/gh")
+    with patch("asyncio.create_subprocess_exec", side_effect=Exception("boom")):
+        assert await _gh_auth_token() is None
+
+    # Case 3: gh returns non-zero code
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 1
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        assert await _gh_auth_token() is None
+
+    # Case 4: gh returns token
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"gho_test123\n", b""))
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        assert await _gh_auth_token() == "gho_test123"
+
+
+@pytest.mark.anyio
+async def test_ssh_github_available_coverage(monkeypatch):
+    from telegram_listener import _ssh_github_available
+    import shutil
+
+    # Case 1: ssh not in path
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    assert await _ssh_github_available() is False
+
+    # Case 2: ssh in path, subprocess raises
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/ssh")
+    with patch("asyncio.create_subprocess_exec", side_effect=Exception("boom")):
+        assert await _ssh_github_available() is False
+
+    # Case 3: ssh unauthenticated
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"", b"Permission denied (publickey)."))
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        assert await _ssh_github_available() is False
+
+    # Case 4: ssh authenticated
+    mock_proc.communicate = AsyncMock(return_value=(b"Hi user! You've successfully authenticated.", b""))
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        assert await _ssh_github_available() is True
+
+
+@pytest.mark.anyio
+async def test_resolve_clone_url_edge_cases():
+    from telegram_listener import resolve_clone_url
+
+    # Empty repo_url
+    url, method, err = await resolve_clone_url("", None)
+    assert url == ""
+    assert method == "as-is"
+
+    # Non-GitHub HTTPS
+    url, method, err = await resolve_clone_url("https://gitlab.com/owner/repo.git", None)
+    assert url == "https://gitlab.com/owner/repo.git"
+    assert method == "as-is"
+
+
+def test_terminate_process_tree_force_pgid_equal_pgrp(monkeypatch):
+    from telegram_listener import _terminate_process_tree
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 9999
+    mock_proc.kill = MagicMock()
+    mock_proc.terminate = MagicMock()
+
+    monkeypatch.setattr(os, "getpgid", lambda pid: os.getpgrp())
+    _terminate_process_tree(mock_proc, force=True)
+    mock_proc.kill.assert_called_once()
+
+    _terminate_process_tree(mock_proc, force=False)
+    mock_proc.terminate.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_wait_or_cancel_process_lookup_error_on_second_wait():
+    from telegram_listener import _wait_or_cancel
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 8888
+    mock_proc.terminate = MagicMock()
+    mock_proc.kill = MagicMock()
+
+    waits = 0
+    async def wait_side_effect():
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            raise asyncio.CancelledError
+        elif waits == 2:
+            raise asyncio.TimeoutError
+        raise ProcessLookupError
+
+    mock_proc.wait = AsyncMock(side_effect=wait_side_effect)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _wait_or_cancel(mock_proc)
+
+
+@pytest.mark.anyio
+async def test_communicate_or_cancel_error_branches():
+    from telegram_listener import _communicate_or_cancel
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 8888
+    mock_proc.terminate = MagicMock()
+    mock_proc.kill = MagicMock()
+
+    waits = 0
+    async def wait_side_effect():
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            raise asyncio.TimeoutError
+        raise ProcessLookupError
+
+    mock_proc.wait = AsyncMock(side_effect=wait_side_effect)
+
+    async def communicate_cancelled():
+        raise asyncio.CancelledError
+
+    mock_proc.communicate = AsyncMock(side_effect=communicate_cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _communicate_or_cancel(mock_proc)
+
+
+def test_get_git_changes_more_than_five_files():
+    from telegram_listener import get_git_changes
+    import subprocess
+
+    mock_res = MagicMock()
+    mock_res.returncode = 0
+    mock_res.stdout = "M file1.py\nM file2.py\nM file3.py\nM file4.py\nM file5.py\nM file6.py\nM file7.py\n"
+
+    with patch("subprocess.run", return_value=mock_res):
+        changes = get_git_changes()
+        assert "and 2 more files" in changes
+
+
+@pytest.mark.anyio
+async def test_fetch_pr_context_nonzero_exits():
+    from telegram_listener import fetch_pr_context
+
+    proc_view = AsyncMock()
+    proc_view.returncode = 1
+    proc_view.communicate = AsyncMock(return_value=(b"", b"Could not resolve PR"))
+
+    proc_diff = AsyncMock()
+    proc_diff.returncode = 1
+    proc_diff.communicate = AsyncMock(return_value=(b"", b"Diff failed"))
+
+    def subprocess_side_effect(*args, **kwargs):
+        if "view" in args:
+            return proc_view
+        return proc_diff
+
+    with patch("asyncio.create_subprocess_exec", side_effect=subprocess_side_effect):
+        ctx = await fetch_pr_context("o/r", 123, "/tmp")
+        assert "Could not fetch PR metadata" in ctx
+        assert "Could not fetch PR diff" in ctx
+
+
+def test_render_markdown_messages_large_splitting():
+    from telegram_listener import render_markdown_messages
+
+    # Large code block splitting
+    huge_code = "```python\n" + ("x = 1\n" * 1000) + "```"
+    chunks = render_markdown_messages(huge_code, max_len=500)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= 500
+
+    # Large text block splitting
+    huge_text = ("This is a very long line of explanatory text without breaks.\n" * 100)
+    text_chunks = render_markdown_messages(huge_text, max_len=500)
+    assert len(text_chunks) > 1
+    for chunk in text_chunks:
+        assert len(chunk) <= 500
+
+
+@pytest.mark.anyio
+async def test_handle_demand_active_pipeline_rejections():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.text = "continue"
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    mock_task = MagicMock()
+    mock_task.done.return_value = False
+    telegram_listener.ACTIVE_TASKS["12345"] = mock_task
+
+    # Resume intent with active pipeline
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.classify_intent", new_callable=AsyncMock, return_value="RESUME"):
+        await telegram_listener.handle_demand(mock_update, mock_context)
+        assert "/stop" in mock_update.message.reply_text.call_args[0][0]
+
+    telegram_listener.ACTIVE_TASKS.clear()
+
+
+@pytest.mark.anyio
+async def test_handle_review_unauthorized():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 99999
+    mock_update.message = AsyncMock()
+    mock_update.message.text = "/review owner/repo#123"
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.run_pr_review", new_callable=AsyncMock) as mock_run:
+        await telegram_listener.handle_review(mock_update, MagicMock())
+        mock_run.assert_not_called()
+
+
+def test_clear_session_write_error_with_repo(tmp_path):
+    from telegram_listener import clear_session
+    session_file = tmp_path / "session.json"
+    with patch("telegram_listener.load_session", return_value={"repo_url": "https://github.com/o/r.git"}), \
+         patch("builtins.open", side_effect=OSError("write error")):
+        clear_session(str(session_file))
+
+
+@pytest.mark.anyio
+async def test_communicate_or_cancel_process_lookup_error_on_second_wait():
+    from telegram_listener import _communicate_or_cancel
+    mock_proc = MagicMock()
+    mock_proc.pid = 7777
+    mock_proc.terminate = MagicMock()
+    mock_proc.kill = MagicMock()
+    waits = 0
+    async def wait_side_effect():
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            raise asyncio.TimeoutError
+        raise ProcessLookupError
+    mock_proc.wait = AsyncMock(side_effect=wait_side_effect)
+    mock_proc.communicate = AsyncMock(side_effect=asyncio.CancelledError)
+    with pytest.raises(asyncio.CancelledError):
+        await _communicate_or_cancel(mock_proc)
+
+
+@pytest.mark.anyio
+async def test_communicate_or_cancel_process_lookup_error_on_first_wait():
+    from telegram_listener import _communicate_or_cancel
+    mock_proc = MagicMock()
+    mock_proc.pid = 7777
+    mock_proc.terminate = MagicMock()
+    mock_proc.wait = AsyncMock(side_effect=ProcessLookupError)
+    mock_proc.communicate = AsyncMock(side_effect=asyncio.CancelledError)
+    with pytest.raises(asyncio.CancelledError):
+        await _communicate_or_cancel(mock_proc)
+
+
+@pytest.mark.anyio
+async def test_run_command_and_stream_process_lookup_error_on_second_wait():
+    from telegram_listener import run_command_and_stream
+    mock_proc = MagicMock()
+    mock_proc.pid = 6666
+    mock_proc.stdout = _BlockingStreamReader()
+    mock_proc.stderr = _BlockingStreamReader()
+    mock_proc.terminate = MagicMock()
+    mock_proc.kill = MagicMock()
+    waits = 0
+    async def wait_side_effect():
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            raise asyncio.TimeoutError
+        raise ProcessLookupError
+    mock_proc.wait = AsyncMock(side_effect=wait_side_effect)
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        task = asyncio.create_task(run_command_and_stream(["sleep", "10"]))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.anyio
+async def test_run_command_and_stream_process_lookup_error_on_first_wait():
+    from telegram_listener import run_command_and_stream
+    mock_proc = MagicMock()
+    mock_proc.pid = 6666
+    mock_proc.stdout = _BlockingStreamReader()
+    mock_proc.stderr = _BlockingStreamReader()
+    mock_proc.terminate = MagicMock()
+    mock_proc.wait = AsyncMock(side_effect=ProcessLookupError)
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        task = asyncio.create_task(run_command_and_stream(["sleep", "10"]))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+def test_get_git_changes_exception():
+    from telegram_listener import get_git_changes
+    with patch("subprocess.run", side_effect=Exception("git error")):
+        assert get_git_changes() == ""
+
+
+@pytest.mark.anyio
+async def test_run_pipeline_summary_with_changes_and_pytest(monkeypatch):
+    import telegram_listener
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    mock_update = _mock_update()
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    mock_proc.wait = AsyncMock(return_value=0)
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "run_command_and_stream", return_value=(0, "tests passed", "")), \
+         patch.object(telegram_listener, "get_git_changes", return_value="• `main.py` (M)"), \
+         patch.object(telegram_listener, "get_pytest_summary", return_value="5 passed"), \
+         patch.object(telegram_listener, "get_pr_url", return_value="https://github.com/o/r/pull/10"):
+        await telegram_listener.run_pipeline(mock_update, MagicMock(), "git@github.com:o/r.git", "demand", is_resume=False)
+
+    replies = [call.args[0] for call in mock_update.message.reply_text.call_args_list]
+    assert any("Files changed:" in msg for msg in replies)
+    assert any("Tests status:" in msg for msg in replies)
+
+
+def test_render_markdown_messages_line_budget_branches():
+    from telegram_listener import render_markdown_messages
+    long_code = "```\n" + ("A" * 60) + "\n" + ("B" * 60) + "\n```"
+    chunks = render_markdown_messages(long_code, max_len=40)
+    assert len(chunks) >= 2
+
+    # Short preceding line followed by very long line
+    long_text = "Short line 1\n" + ("X" * 100) + "\n" + ("Y" * 100)
+    chunks_text = render_markdown_messages(long_text, max_len=40)
+    assert len(chunks_text) >= 2
+
+    # Multiple paragraphs forcing buffer flush in push
+    res = render_markdown_messages("Para 1\n\nPara 2\n\nPara 3\n\nPara 4", max_len=18)
+    assert len(res) >= 2
+
+
+@pytest.mark.anyio
+async def test_handle_demand_active_pipeline_rejection_new_demand():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.text = "owner/repo: new demand"
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    mock_task = MagicMock()
+    mock_task.done.return_value = False
+    telegram_listener.ACTIVE_TASKS["12345"] = mock_task
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.classify_intent", new_callable=AsyncMock, return_value="NEW_DEMAND"):
+        await telegram_listener.handle_demand(mock_update, mock_context)
+        assert "/stop" in mock_update.message.reply_text.call_args[0][0]
+
+    telegram_listener.ACTIVE_TASKS.clear()
+
+

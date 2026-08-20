@@ -6,7 +6,14 @@ from agents.adapters.aider import AiderAgentCLI
 from agents.adapters.claude import ClaudeCodeAgentCLI
 from agents.adapters.cursor import CursorAgentCLI
 from agents.auth.cursor import CursorAuthResolver
-from agents.pipeline import PIPELINE_CONFIG, resolve_pipeline_config
+from agents.pipeline import (
+    PIPELINE_CONFIG,
+    DEFAULT_PIPELINE_MODE,
+    MODE_EASY,
+    MODE_HARD,
+    normalize_mode,
+    resolve_pipeline_config,
+)
 from agents.review_pipeline import PR_REVIEW_CONFIG, resolve_review_pipeline_config
 from agents.registry import AgentRegistry as RegistryClass
 from agents.tool_specs import get_registered_tools, validate_tool
@@ -188,8 +195,70 @@ def test_resolve_pipeline_config_deep_copies_steps():
     assert PIPELINE_CONFIG[0]["tool"] == "agy"
 
 
+def test_normalize_mode():
+    assert normalize_mode("easy") == MODE_EASY
+    assert normalize_mode("simple") == MODE_EASY
+    assert normalize_mode("facil") == MODE_EASY
+    assert normalize_mode("fácil") == MODE_EASY
+    assert normalize_mode("simples") == MODE_EASY
+    assert normalize_mode("hard") == MODE_HARD
+    assert normalize_mode("complex") == MODE_HARD
+    assert normalize_mode("dificil") == MODE_HARD
+    assert normalize_mode("difícil") == MODE_HARD
+    assert normalize_mode("complexo") == MODE_HARD
+    assert normalize_mode("complexa") == MODE_HARD
+    assert normalize_mode(None) == DEFAULT_PIPELINE_MODE
+    assert normalize_mode("") == DEFAULT_PIPELINE_MODE
+
+    with pytest.raises(ValueError, match="Unknown pipeline mode"):
+        normalize_mode("unknown_mode")
+
+
+def test_resolve_pipeline_config_easy_mode():
+    resolved = resolve_pipeline_config("cursor", mode="easy")
+    # Easy mode has 6 steps (skips Architect Reviewer)
+    assert len(resolved) == 6
+    step_names = [s["step_name"] for s in resolved]
+    assert "Architect Reviewer (Plan Validation - PLAN)" not in step_names
+    assert step_names[0] == "Architect (Planning - PLAN)"
+    assert step_names[1] == "Test Developer (Testing - RED)"
+    assert step_names[2] == "Developer (Implementation - GREEN)"
+    assert step_names[3] == "Code Reviewer (Review - PLAN)"
+    assert step_names[4] == "Refactoring Developer (Refactoring - REFACTOR)"
+    assert step_names[5] == "GitOps (Documentation and PR)"
+
+    # Code Reviewer in easy mode has medium reasoning budget
+    code_reviewer = next(s for s in resolved if s["step_name"] == "Code Reviewer (Review - PLAN)")
+    assert code_reviewer["reasoning_budget"] == "medium"
+
+
+def test_resolve_pipeline_config_hard_mode():
+    resolved = resolve_pipeline_config("cursor", mode="hard")
+    # Hard mode has all 7 steps (includes Architect Reviewer)
+    assert len(resolved) == 7
+    step_names = [s["step_name"] for s in resolved]
+    assert "Architect Reviewer (Plan Validation - PLAN)" in step_names
+    assert step_names[0] == "Architect (Planning - PLAN)"
+    assert step_names[1] == "Architect Reviewer (Plan Validation - PLAN)"
+    assert step_names[2] == "Test Developer (Testing - RED)"
+    assert step_names[3] == "Developer (Implementation - GREEN)"
+    assert step_names[4] == "Code Reviewer (Review - PLAN)"
+    assert step_names[5] == "Refactoring Developer (Refactoring - REFACTOR)"
+    assert step_names[6] == "GitOps (Documentation and PR)"
+
+    step1 = resolved[1]
+    assert step1["model"] == "gemini-3.1-pro"
+    assert step1["reasoning_budget"] == "high"
+    assert "architect_plan.md" in step1["prompt"]
+    assert "architect_abort.txt" in step1["prompt"]
+
+    # Code Reviewer in hard mode has high reasoning budget
+    code_reviewer = next(s for s in resolved if s["step_name"] == "Code Reviewer (Review - PLAN)")
+    assert code_reviewer["reasoning_budget"] == "high"
+
+
 def test_resolve_pipeline_config_preserves_step_metadata():
-    resolved = resolve_pipeline_config("cursor")
+    resolved = resolve_pipeline_config("cursor", mode="hard")
     step0 = resolved[0]
     assert step0["step_name"] == "Architect (Planning - PLAN)"
     assert step0["model"] == "gemini-3.7-flash"
@@ -208,6 +277,7 @@ def test_resolve_review_pipeline_config_explicit_tool():
     assert len(resolved) == 1
     assert resolved[0]["tool"] == "claude"
     assert resolved[0]["step_name"] == "PR Reviewer"
+    assert resolved[0]["timeout"] == "5m"
     assert "{pr_number}" in resolved[0]["prompt"]
     assert "{pr_context}" in resolved[0]["prompt"]
 

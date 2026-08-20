@@ -9,12 +9,16 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
 - **TDD Workflow**: Enforces tests first — production code is only added to satisfy failing tests (Red-Green-Refactor).
 - **Pluggable Agent CLI**: Select the tool via `AGENT_TOOL` in `.env`. The image installs only that CLI; volume mounts and auth are generated automatically.
 - **Flexible Git Authentication**: HTTPS cloning (`GITHUB_TOKEN`) or SSH cloning (dedicated key mounted read-only into the container).
-- **Multi-Model Orchestration**: Seven specialized steps defined in `agents/pipeline.py`. `AGENT_TOOL` selects one CLI for the entire run; per-step `model` and `reasoning_budget` from the config are passed to each adapter (adapters may ignore them).
+- **Multi-Model Orchestration**: Configurable TDD pipeline supporting two operational modes:
+  - ⚡ **Easy Mode** (Default — for standard tasks): Skips the Architect Reviewer validation and sets Code Reviewer reasoning budget to `medium` for faster execution.
+  - 🛡️ **Hard Mode** (for complex/difficult tasks): Runs full 7-step pipeline with Architect Reviewer validation (`gemini-3.1-pro`, `high` reasoning) and Code Reviewer with `high` reasoning.
+
+  Pipeline Steps:
   1. **Architect** (Planning — PLAN): `gemini-3.7-flash`, high reasoning, 5m timeout.
-  2. **Architect Reviewer** (Plan Validation — PLAN): `gemini-3.1-pro`, high reasoning, 5m timeout. Validates the plan; aborts the pipeline if flawed or appends notes/observations in append-only mode.
+  2. **Architect Reviewer** (Plan Validation — PLAN, *Hard mode only*): `gemini-3.1-pro`, high reasoning, 5m timeout. Validates the plan; aborts the pipeline if flawed or appends notes/observations in append-only mode.
   3. **Test Developer** (Testing — RED): `gemini-3.7-flash`, medium reasoning, 10m timeout.
   4. **Developer** (Implementation — GREEN): `gemini-3.7-flash`, medium reasoning, 10m timeout.
-  5. **Code Reviewer** (Review — PLAN): `gemini-3.7-flash`, high reasoning, 10m timeout.
+  5. **Code Reviewer** (Review — PLAN): `gemini-3.7-flash`, medium reasoning in Easy mode / high reasoning in Hard mode, 5m timeout.
   6. **Refactoring Developer** (Refactoring — REFACTOR): `gemini-3.7-flash`, medium reasoning, 10m timeout.
   7. **GitOps** (Documentation and PR): `gemini-3.7-flash`, low reasoning.
 
@@ -26,6 +30,7 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
   | `cursor` | `agent -p … --model cursor-grok-4.5-high --trust --force` | Always `cursor-grok-4.5-high`; pipeline model/reasoning ignored |
   | `claude` | `claude --print --model … --effort …` | Gemini slugs mapped to Claude aliases; reasoning → `--effort` |
   | `aider` | `aider --model … --message …` | Per-step `model` passed to `--model`; reasoning ignored |
+
 
 ---
 
@@ -211,10 +216,25 @@ make test
 
 On failure, state is persisted to `~/.config/aegis-phalanx/session.json` (mounted from the host).
 
+### Demands & Operational Modes
+
+Send demands directly via Telegram:
+
+- **Easy Mode** (Default — skips Architect Reviewer, medium review effort):
+  - `owner/repo: add login endpoint`
+  - `[easy] owner/repo: add login endpoint`
+  - `owner/repo: fácil: add login endpoint`
+- **Hard Mode** (Includes Architect Reviewer plan validation & high review effort):
+  - `[hard] owner/repo: refactor authentication architecture`
+  - `owner/repo: [hard] refactor authentication architecture`
+  - `owner/repo: difícil: refactor authentication architecture`
+  - `owner/repo: --hard refactor authentication architecture`
+
 ### Commands
 
+- `/start` — Show help and mode selection instructions.
 - `/continue` or `/resume` — Resume from the first failed/incomplete step.
-- `/status` — Show step statuses, repository, branch, and demand.
+- `/status` — Show active mode, step statuses, repository, branch, and demand.
 - `/review` — Review an existing GitHub PR (see [PR review](#pr-review-review)).
 - `/stop` — Cancel a running pipeline.
 - `/clear` — Delete session memory.

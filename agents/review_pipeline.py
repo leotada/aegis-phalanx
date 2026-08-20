@@ -10,7 +10,7 @@ PR_REVIEW_CONFIG = [
         "tool": "agy",
         "model": "gemini-3.7-flash",
         "reasoning_budget": "high",
-        "timeout": "10m",
+        "timeout": "5m",
         "prompt": (
             "Act as a Staff Engineer code reviewer whose primary job is to find problems. "
             "Review Pull Request #{pr_number} in repository {repo_owner_name}.\n\n"

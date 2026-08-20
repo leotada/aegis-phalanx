@@ -17,7 +17,16 @@ from typing import Dict, List
 from telegram import Update, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, Application
 
-from agents import AgentRegistry, DEFAULT_AGENT_TOOL, resolve_pipeline_config, resolve_review_pipeline_config
+from agents import (
+    AgentRegistry,
+    DEFAULT_AGENT_TOOL,
+    DEFAULT_PIPELINE_MODE,
+    MODE_EASY,
+    MODE_HARD,
+    normalize_mode,
+    resolve_pipeline_config,
+    resolve_review_pipeline_config,
+)
 from agents.config import AGENT_INTENT_TIMEOUT, AGENT_STEP_TIMEOUT
 from agents.tool_specs import get_tool_spec
 
@@ -180,31 +189,47 @@ def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -
         left_part = demand_stripped[:start_idx]
         right_part = demand_stripped[end_idx:]
         
-        # Clean colons/dashes right after or before the URL
-        right_part = re.sub(r'^\s*[:\-]\s*', '', right_part)
-        left_part = re.sub(r'\s*[:\-]\s*$', '', left_part)
+        # Clean colons/dashes/dots right after the URL
+        right_part = re.sub(r'^\s*[:\-.,;]\s*', '', right_part)
+        # Clean demand/task prefix in right_part if present
+        right_part = re.sub(r'^\s*(?:demanda|demand|task|tarefa|descri[cç][aã]o|description)\s*[:\-.,;]?\s*', '', right_part, flags=re.IGNORECASE)
+
+        # Clean colons/dashes/dots right before the URL
+        left_part = re.sub(r'\s*[:\-.,;]\s*$', '', left_part)
         
+        # Clean repository keywords and prepositions before the URL
+        left_part = re.sub(r'(?:\b(?:no|na|do|da|em|para\s+o|para\s+a|para|de|in|for|on|to|at|into|from|of)\s+)?\b(?:reposit[oó]rios?|repos?|repository|repositories)\b\s*$', '', left_part, flags=re.IGNORECASE)
         # Clean prepositions before the URL
-        left_part = re.sub(r'\b(in|for|on|to|at|into|from)\s*$', '', left_part, flags=re.IGNORECASE)
+        left_part = re.sub(r'\b(in|for|on|to|at|into|from|no|na|do|da|em|para|de)\s*$', '', left_part, flags=re.IGNORECASE)
+        left_part = re.sub(r'\s*[:\-.,;]\s*$', '', left_part)
         
         clean_demand = (left_part.strip() + " " + right_part.strip()).strip()
         return normalize_repo_url(repo_url), clean_demand
 
-    # 2. Match shorthand owner/repo followed by a colon at the start of the message
-    shorthand_colon_match = re.match(
-        r'^([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+?)(?:\.git)?\s*:\s*(.*)$',
+    # Clean leading repo label if present before shorthand or text
+    shorthand_cleaned = re.sub(
+        r'^(?:(?:no|na|do|da|em|para\s+o|para\s+a|para|de|in|for|on|to|at|into|from|of)\s+)?\b(?:reposit[oó]rios?|repos?|repository|repositories)\b\s*[:\-.,;]?\s*',
+        '',
         demand_stripped,
+        flags=re.IGNORECASE
+    )
+
+    # 2. Match shorthand owner/repo followed by a colon or separator at the start of the message
+    shorthand_colon_match = re.match(
+        r'^([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+?)(?:\.git)?\s*[:\-]\s*(.*)$',
+        shorthand_cleaned,
         re.IGNORECASE
     )
     if shorthand_colon_match:
         repo_name = shorthand_colon_match.group(1)
         clean_demand = shorthand_colon_match.group(2).strip()
+        clean_demand = re.sub(r'^(?:demanda|demand|task|tarefa|descri[cç][aã]o|description)\s*[:\-.,;]?\s*', '', clean_demand, flags=re.IGNORECASE).strip()
         return normalize_repo_url(repo_name), clean_demand
 
     # 3. Match shorthand owner/repo by itself (entire string)
     shorthand_exact_match = re.match(
         r'^([a-zA-Z0-9_\-]+/[a-zA-Z0-9_\-\.]+?)(?:\.git)?$',
-        demand_stripped,
+        shorthand_cleaned,
         re.IGNORECASE
     )
     if shorthand_exact_match:
@@ -219,6 +244,67 @@ def parse_demand(demand: str, default_repo: str = None, last_repo: str = None) -
         return normalize_repo_url(last_repo), demand
         
     return None, demand
+
+
+def extract_pipeline_mode(text: str) -> tuple[str, str]:
+    """
+    Extracts the execution mode ('easy' or 'hard') from user input and returns (cleaned_text, mode).
+    Defaults to 'easy' if no mode indicator is present.
+    """
+    if not isinstance(text, str):
+        text = str(text) if text is not None else ""
+    if not text:
+        return text, MODE_EASY
+
+    hard_patterns = [
+        r'\[(?:hard|complex|dif[ií]cil|complex[oa])\]',
+        r'\((?:hard|complex|dif[ií]cil|complex[oa])\)',
+        r'--+(?:hard|complex|dif[ií]cil|complex[oa])\b',
+        r'\b(?:tarefa|modo|task|mode)\s*[:\-]?\s*(?:dif[ií]cil|dificil|hard|complex[oa]|complex)\b\s*[:\-.,;]?\s*',
+        r'\b(?:dif[ií]cil|dificil|hard|complex[oa]|complex)\s+(?:tarefa|modo|task|mode)\b\s*[:\-.,;]?\s*',
+        r'(?:^|[\n\r])\s*(?:hard|dif[ií]cil|dificil|complex[oa]|complex)\s*[:\-.,;]?\s*(?:[\n\r]|$)',
+        r'\b(?:hard|dif[ií]cil|dificil|complex[oa]|complex)\s*[:\-.,;]\s*',
+    ]
+
+    easy_patterns = [
+        r'\[(?:easy|simple|f[aá]cil|facil|simples)\]',
+        r'\((?:easy|simple|f[aá]cil|facil|simples)\)',
+        r'--+(?:easy|simple|f[aá]cil|facil|simples)\b',
+        r'\b(?:tarefa|modo|task|mode)\s*[:\-]?\s*(?:f[aá]cil|facil|simples|easy|simple)\b\s*[:\-.,;]?\s*',
+        r'\b(?:f[aá]cil|facil|simples|easy|simple)\s+(?:tarefa|modo|task|mode)\b\s*[:\-.,;]?\s*',
+        r'(?:^|[\n\r])\s*(?:easy|f[aá]cil|facil|simples|simple)\s*[:\-.,;]?\s*(?:[\n\r]|$)',
+        r'\b(?:easy|f[aá]cil|facil|simples|simple)\s*[:\-.,;]\s*',
+    ]
+
+    detected_mode = None
+    cleaned = text
+
+    for pattern in hard_patterns:
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if match:
+            detected_mode = MODE_HARD
+            start, end = match.span()
+            left = cleaned[:start].rstrip()
+            right = cleaned[end:].lstrip()
+            right = re.sub(r'^[\s:\-.,;]+', '', right)
+            cleaned = (left + " " + right).strip() if left and right else (left or right).strip()
+            break
+
+    if not detected_mode:
+        for pattern in easy_patterns:
+            match = re.search(pattern, cleaned, re.IGNORECASE)
+            if match:
+                detected_mode = MODE_EASY
+                start, end = match.span()
+                left = cleaned[:start].rstrip()
+                right = cleaned[end:].lstrip()
+                right = re.sub(r'^[\s:\-.,;]+', '', right)
+                cleaned = (left + " " + right).strip() if left and right else (left or right).strip()
+                break
+
+    mode = detected_mode if detected_mode else MODE_EASY
+    return cleaned, mode
+
 
 def parse_pr_reference(text: str, default_repo: str = None) -> tuple[str | None, int | None]:
     """
@@ -286,16 +372,25 @@ async def _reject_if_pipeline_active(update: Update) -> bool:
     return False
 
 
-def save_session(repo_url: str, demand: str, last_completed_step: str, steps_status: dict, git_branch: str, session_file_path: str = SESSION_FILE_PATH) -> None:
+def save_session(
+    repo_url: str,
+    demand: str,
+    last_completed_step: str,
+    steps_status: dict,
+    git_branch: str,
+    session_file_path: str = SESSION_FILE_PATH,
+    mode: str = MODE_EASY,
+) -> None:
     """Saves the current pipeline session metadata to a JSON file."""
     try:
         os.makedirs(os.path.dirname(session_file_path), exist_ok=True)
         data = {
             "repo_url": repo_url,
             "demand": demand,
+            "mode": mode,
             "last_completed_step": last_completed_step,
             "steps_status": steps_status,
-            "git_branch": git_branch
+            "git_branch": git_branch,
         }
         with open(session_file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
@@ -709,7 +804,7 @@ def get_model_quota_summary() -> str:
         print(f"Error fetching model quota: {e}", flush=True)
         return ""
 
-async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_url: str, demand: str, is_resume: bool = False):
+async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_url: str, demand: str, mode: str = MODE_EASY, is_resume: bool = False):
     chat_id = str(update.effective_chat.id)
     current_task = asyncio.current_task()
     ACTIVE_TASKS[chat_id] = current_task
@@ -719,7 +814,6 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
     try:
         project_dir = "/workspace/project"
         github_token = os.environ.get("GITHUB_TOKEN")
-        pipeline_config = resolve_pipeline_config()
 
         # Setup or load session data
         session_data = load_session()
@@ -732,8 +826,10 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                 return
             repo_url = session_data["repo_url"]
             demand = session_data["demand"]
+            mode = session_data.get("mode", MODE_EASY)
             git_branch = session_data["git_branch"]
             steps_status = session_data.get("steps_status", {})
+            pipeline_config = resolve_pipeline_config(mode=mode)
             
             # Determine starting step index
             start_index = 0
@@ -746,9 +842,11 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                 await update.message.reply_text("✅ All steps in the last pipeline were already completed successfully!")
                 return
                 
+            mode_label = "Hard (Thorough Review)" if mode == MODE_HARD else "Easy (Fast)"
             await update.message.reply_text(
                 f"🔄 <b>Resuming pipeline for:</b>\n"
                 f"📦 <b>Repository:</b> <code>{repo_url}</code>\n"
+                f"⚙️ <b>Mode:</b> <code>{mode_label}</code>\n"
                 f"💡 <b>Demand:</b> <code>{html.escape(demand)}</code>\n"
                 f"⏳ <b>Resuming from step:</b> <code>{pipeline_config[start_index]['step_name']}</code>",
                 parse_mode="HTML"
@@ -757,13 +855,16 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
             # New demand: clean up previous session if any
             clear_session()
             start_index = 0
+            pipeline_config = resolve_pipeline_config(mode=mode)
             # Determine git branch name based on demand description
             clean_name = re.sub(r'[^a-zA-Z0-9]', '-', demand.lower())[:30].strip('-')
             git_branch = f"feature/{clean_name}"
             
+            mode_label = "Hard (Thorough Review)" if mode == MODE_HARD else "Easy (Fast)"
             await update.message.reply_text(
                 f"🚀 <b>Starting Multi-Model TDD Pipeline</b>\n"
                 f"📦 <b>Repository:</b> <code>{repo_url}</code>\n"
+                f"⚙️ <b>Mode:</b> <code>{mode_label}</code>\n"
                 f"💡 <b>Demand:</b> <code>{html.escape(demand)}</code>",
                 parse_mode="HTML"
             )
@@ -873,7 +974,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                 if returncode != 0:
                     # Mark step as failed
                     steps_status[step_name] = "failed"
-                    save_session(repo_url, demand, step_name if idx == 0 else pipeline_config[idx-1]["step_name"], steps_status, git_branch)
+                    save_session(repo_url, demand, step_name if idx == 0 else pipeline_config[idx-1]["step_name"], steps_status, git_branch, mode=mode)
                     
                     error_msg = f"⚠️ <b>Failure in step {step_name}:</b>\n\n"
                     if stderr_str.strip():
@@ -897,7 +998,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                         pass
 
                     steps_status[step_name] = "aborted"
-                    save_session(repo_url, demand, step_name if idx == 0 else pipeline_config[idx-1]["step_name"], steps_status, git_branch)
+                    save_session(repo_url, demand, step_name if idx == 0 else pipeline_config[idx-1]["step_name"], steps_status, git_branch, mode=mode)
                     await update.message.reply_text(
                         f"🚫 <b>Pipeline Aborted by Architect Review:</b>\n\n"
                         f"<b>Reason:</b>\n<pre>{html.escape(abort_reason[:1500])}</pre>",
@@ -907,7 +1008,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
 
                 # Mark step as successful
                 steps_status[step_name] = "success"
-                save_session(repo_url, demand, step_name, steps_status, git_branch)
+                save_session(repo_url, demand, step_name, steps_status, git_branch, mode=mode)
 
                 # Generate smart summary of key metrics
                 pytest_sum = get_pytest_summary(stdout_str)
@@ -942,7 +1043,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
                     
             except Exception as e:
                 steps_status[step_name] = "failed"
-                save_session(repo_url, demand, step_name if idx == 0 else pipeline_config[idx-1]["step_name"], steps_status, git_branch)
+                save_session(repo_url, demand, step_name if idx == 0 else pipeline_config[idx-1]["step_name"], steps_status, git_branch, mode=mode)
                 await update.message.reply_text(f"❌ System error in step {step_name}: {str(e)}")
                 return
 
@@ -983,7 +1084,7 @@ async def run_pipeline(update: Update, context: ContextTypes.DEFAULT_TYPE, repo_
         if step_name:
             steps_status[step_name] = "failed"
             last_completed = step_name if (idx is not None and idx == 0) else pipeline_config[idx-1]["step_name"]
-            save_session(repo_url, demand, last_completed, steps_status, git_branch)
+            save_session(repo_url, demand, last_completed, steps_status, git_branch, mode=mode)
             await update.message.reply_text(
                 f"🛑 <b>Pipeline stopped in step:</b> <code>{step_name}</code>\n"
                 "You can resume later with <code>/continue</code>.",
@@ -1307,7 +1408,13 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
         default_repo = os.environ.get("DEFAULT_REPO")
         session = load_session()
         last_repo = session.get("repo_url") if session else None
-        repo_url, demand = parse_demand(raw_demand, default_repo, last_repo)
+        clean_raw, mode = extract_pipeline_mode(raw_demand)
+        repo_url, demand = parse_demand(clean_raw, default_repo, last_repo)
+
+        # Also check demand itself in case format was repo: [hard] demand
+        demand, demand_mode = extract_pipeline_mode(demand)
+        if mode == MODE_EASY and demand_mode == MODE_HARD:
+            mode = MODE_HARD
         
         if not repo_url:
             await update.message.reply_text(
@@ -1318,7 +1425,7 @@ async def handle_demand(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await _reject_if_pipeline_active(update):
             return
             
-        await run_pipeline(update, context, repo_url, demand, is_resume=False)
+        await run_pipeline(update, context, repo_url, demand, mode=mode, is_resume=False)
 
 async def handle_continue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
@@ -1399,10 +1506,13 @@ async def send_status(update: Update):
         return
 
     quota_section = await asyncio.to_thread(get_model_quota_summary)
-        
+    mode = session.get("mode", MODE_EASY)
+    mode_label = "Hard (Thorough Review)" if mode == MODE_HARD else "Easy (Fast)"
+
     status_msg = (
         f"🧠 <b>Aegis Session Memory:</b>\n\n"
         f"📦 <b>Repository:</b> <code>{session.get('repo_url', 'N/A')}</code>\n"
+        f"⚙️ <b>Mode:</b> <code>{mode_label}</code>\n"
         f"💡 <b>Demand:</b> <code>{html.escape(session.get('demand', 'N/A'))}</code>\n"
         f"🌿 <b>Branch:</b> <code>{session.get('git_branch', 'N/A')}</code>\n"
         f"🏁 <b>Last Completed:</b> <code>{session.get('last_completed_step', 'N/A')}</code>\n\n"
@@ -1410,7 +1520,7 @@ async def send_status(update: Update):
     if quota_section:
         status_msg += quota_section
     status_msg += "📊 <b>Step Statuses:</b>\n"
-    pipeline_config = resolve_pipeline_config()
+    pipeline_config = resolve_pipeline_config(mode=mode)
     for step in pipeline_config:
         step_name = step["step_name"]
         status = session.get("steps_status", {}).get(step_name, "pending")
@@ -1421,7 +1531,24 @@ async def send_status(update: Update):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) == ALLOWED_CHAT_ID:
-        await update.message.reply_text("🤖 Multi-Agent System Online. Awaiting requirements...")
+        start_message = (
+            "🤖 <b>Aegis Multi-Agent System Online</b>\n\n"
+            "Send your demand with the desired execution mode:\n\n"
+            "⚡ <b>Easy / Standard Mode</b> (Default — faster, skips Architect Reviewer, medium review reasoning):\n"
+            "• <code>owner/repo: your demand</code>\n"
+            "• <code>[easy] owner/repo: your demand</code>\n\n"
+            "🛡️ <b>Hard / Complex Mode</b> (Thorough — includes Architect Reviewer validation & high review reasoning):\n"
+            "• <code>[hard] owner/repo: your demand</code>\n"
+            "• <code>owner/repo: [hard] your demand</code>\n"
+            "• <code>owner/repo: difícil: your demand</code>\n\n"
+            "<b>Available Commands:</b>\n"
+            "• <code>/continue</code> - Resume paused/failed pipeline\n"
+            "• <code>/status</code> - Check active task and quota status\n"
+            "• <code>/stop</code> - Cancel currently running pipeline\n"
+            "• <code>/clear</code> - Clear active session memory\n"
+            "• <code>/review owner/repo#123</code> - Review an existing GitHub PR"
+        )
+        await update.message.reply_text(start_message, parse_mode="HTML")
 
 async def post_init(application: Application) -> None:
     """Registers slash commands in the Telegram client UI."""

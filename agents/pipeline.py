@@ -42,7 +42,7 @@ PIPELINE_CONFIG = [
         "tool": "agy",
         "model": "gemini-3.7-flash",
         "reasoning_budget": "high",
-        "timeout": "10m",
+        "timeout": "5m",
         "prompt": "Act as a Staff Engineer reviewer whose primary job is to find problems. Read the `architect_plan.md` file for context and analyze the recent changes. Focus on actionable findings, prioritized in this order: 1) Business-rule violations - incorrect domain logic, missing or wrong validation, or behavior that contradicts the requirements in `architect_plan.md`; 2) Technical issues - bugs, edge cases, security vulnerabilities, data-integrity risks, error-handling gaps, and missing or inadequate test coverage for risky paths; 3) Important improvements - locate the repository's `AGENTS.md` conventions file if one exists (commonly at the repo root, or under `.agents/`, `.github/`, or `docs/`) and flag any changes that deviate from the standards, conventions, and guidelines documented there, plus changes that materially improve correctness, reliability, or maintainability. Do NOT modify the code or run refactoring. Instead, create a refactoring plan that lists ONLY problems requiring action - each with severity (blocker/major/minor), location, what is wrong, and step-by-step fixing instructions. Do NOT describe what is correct or well done, do NOT praise, summarize, or add general observations - only actionable items. Write this plan into a file named `refactor_plan.md` in the root of the repository. If there are no actionable issues, write only the line `No actionable issues found.` into `refactor_plan.md`. After the review, delete the `architect_plan.md` file.",
     },
     {
@@ -63,7 +63,40 @@ PIPELINE_CONFIG = [
 ]
 
 
-def resolve_pipeline_config(tool: str | None = None) -> list[dict]:
-    """Return pipeline steps with the active agent tool applied."""
+MODE_EASY = "easy"
+MODE_HARD = "hard"
+DEFAULT_PIPELINE_MODE = MODE_EASY
+
+
+def normalize_mode(mode: str | None = None) -> str:
+    """Normalizes and validates pipeline mode to 'easy' or 'hard'. Defaults to 'easy'."""
+    if not mode:
+        return DEFAULT_PIPELINE_MODE
+    m = mode.strip().lower()
+    if m in ("hard", "complex", "dificil", "difícil", "complexo", "complexa"):
+        return MODE_HARD
+    if m in ("easy", "simple", "facil", "fácil", "simples"):
+        return MODE_EASY
+    raise ValueError(f"Unknown pipeline mode: '{mode}'. Expected '{MODE_EASY}' or '{MODE_HARD}'.")
+
+
+def resolve_pipeline_config(tool: str | None = None, mode: str | None = DEFAULT_PIPELINE_MODE) -> list[dict]:
+    """Return pipeline steps with the active agent tool and execution mode applied."""
     selected_tool = validate_tool(tool if tool is not None else os.environ.get("AGENT_TOOL", DEFAULT_AGENT_TOOL))
-    return [{**copy.deepcopy(step), "tool": selected_tool} for step in PIPELINE_CONFIG]
+    normalized_mode = normalize_mode(mode)
+
+    steps = []
+    for step in PIPELINE_CONFIG:
+        # In easy mode, skip the Architect Reviewer validation step
+        if normalized_mode == MODE_EASY and step["step_name"] == "Architect Reviewer (Plan Validation - PLAN)":
+            continue
+
+        step_copy = {**copy.deepcopy(step), "tool": selected_tool}
+
+        # In easy mode, reduce Code Reviewer reasoning budget from high to medium
+        if normalized_mode == MODE_EASY and step_copy["step_name"] == "Code Reviewer (Review - PLAN)":
+            step_copy["reasoning_budget"] = "medium"
+
+        steps.append(step_copy)
+
+    return steps

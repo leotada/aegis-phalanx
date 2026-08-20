@@ -7,6 +7,7 @@ from agents.pipeline import PIPELINE_CONFIG, resolve_pipeline_config
 from telegram_listener import (
     sanitize_environment,
     parse_demand,
+    extract_pipeline_mode,
     parse_pr_reference,
     save_session,
     load_session,
@@ -105,9 +106,13 @@ def test_agent_registry_has_cursor():
 
 def test_pipeline_tool_env_override(monkeypatch):
     monkeypatch.setenv("AGENT_TOOL", "cursor")
-    resolved = resolve_pipeline_config()
-    assert len(resolved) == len(PIPELINE_CONFIG)
-    assert all(step["tool"] == "cursor" for step in resolved)
+    resolved_easy = resolve_pipeline_config(mode="easy")
+    assert len(resolved_easy) == 6
+    assert all(step["tool"] == "cursor" for step in resolved_easy)
+
+    resolved_hard = resolve_pipeline_config(mode="hard")
+    assert len(resolved_hard) == len(PIPELINE_CONFIG) == 7
+    assert all(step["tool"] == "cursor" for step in resolved_hard)
 
 
 def test_extract_owner_repo_ssh():
@@ -225,19 +230,71 @@ def test_parse_pr_reference_number_without_default_repo():
     assert repo is None
     assert pr_number is None
 
+def test_extract_pipeline_mode():
+    # Hard mode variations
+    assert extract_pipeline_mode("[hard] Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("(hard) Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("--hard Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("hard: Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("dificil: Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("difícil: Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("complex: Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("complexo: Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("complexa: Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("tarefa difícil: Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("tarefa dificil: Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("modo difícil: Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("hard mode: Add user auth") == ("Add user auth", "hard")
+    assert extract_pipeline_mode("owner/repo: [hard] Add user auth") == ("owner/repo: Add user auth", "hard")
+
+    # Easy mode variations
+    assert extract_pipeline_mode("[easy] Fix typo") == ("Fix typo", "easy")
+    assert extract_pipeline_mode("(easy) Fix typo") == ("Fix typo", "easy")
+    assert extract_pipeline_mode("--easy Fix typo") == ("Fix typo", "easy")
+    assert extract_pipeline_mode("easy: Fix typo") == ("Fix typo", "easy")
+    assert extract_pipeline_mode("facil: Fix typo") == ("Fix typo", "easy")
+    assert extract_pipeline_mode("fácil: Fix typo") == ("Fix typo", "easy")
+    assert extract_pipeline_mode("simples: Fix typo") == ("Fix typo", "easy")
+    assert extract_pipeline_mode("simple: Fix typo") == ("Fix typo", "easy")
+    assert extract_pipeline_mode("tarefa fácil: Fix typo") == ("Fix typo", "easy")
+    assert extract_pipeline_mode("tarefa simples: Fix typo") == ("Fix typo", "easy")
+    assert extract_pipeline_mode("owner/repo: [easy] Fix typo") == ("owner/repo: Fix typo", "easy")
+
+    # Punctuation and standalone variations (dot, comma, semicolon, dash, newline)
+    assert extract_pipeline_mode("Difícil. Repositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "hard")
+    assert extract_pipeline_mode("dificil. Repositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "hard")
+    assert extract_pipeline_mode("Difícil - Repositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "hard")
+    assert extract_pipeline_mode("Difícil, Repositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "hard")
+    assert extract_pipeline_mode("Difícil; Repositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "hard")
+    assert extract_pipeline_mode("Modo: Difícil. Repositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "hard")
+    assert extract_pipeline_mode("Modo difícil. Repositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "hard")
+    assert extract_pipeline_mode("Difícil\nRepositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "hard")
+    assert extract_pipeline_mode("Fácil. Repositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "easy")
+    assert extract_pipeline_mode("Modo: fácil. Repositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "easy")
+    assert extract_pipeline_mode("Simples. Repositório https://github.com/owner/repo.git") == ("Repositório https://github.com/owner/repo.git", "easy")
+    assert extract_pipeline_mode("Hard. Repo https://github.com/owner/repo.git") == ("Repo https://github.com/owner/repo.git", "hard")
+    assert extract_pipeline_mode("Easy. Repo https://github.com/owner/repo.git") == ("Repo https://github.com/owner/repo.git", "easy")
+
+    # Default / no tag -> easy
+    assert extract_pipeline_mode("Add simple user auth") == ("Add simple user auth", "easy")
+    assert extract_pipeline_mode("owner/repo: Add user auth") == ("owner/repo: Add user auth", "easy")
+    assert extract_pipeline_mode("") == ("", "easy")
+
+
 def test_save_load_clear_session(tmp_path):
     session_file = tmp_path / "session.json"
     
     # Assert load on non-existing file returns default structure
     assert load_session(session_file) is None
     
-    # Save a session state
+    # Save a session state with mode
     save_session(
         repo_url="https://github.com/owner/repo.git",
         demand="implement user auth",
         last_completed_step="Developer",
         steps_status={"Architect": "success", "Developer": "success", "Reviewer": "pending"},
         git_branch="feature/user-auth",
+        mode="hard",
         session_file_path=session_file
     )
     
@@ -246,6 +303,7 @@ def test_save_load_clear_session(tmp_path):
     assert session is not None
     assert session["repo_url"] == "https://github.com/owner/repo.git"
     assert session["demand"] == "implement user auth"
+    assert session["mode"] == "hard"
     assert session["last_completed_step"] == "Developer"
     assert session["steps_status"]["Architect"] == "success"
     assert session["git_branch"] == "feature/user-auth"
@@ -411,6 +469,32 @@ def test_parse_demand_various_formats():
     assert repo == "https://github.com/owner/repo.git"
     assert clean == "do something"
 
+    # Repositório / Repo / Repository label prefixes before URL
+    repo, clean = parse_demand("Repositório  https://github.com/leotada/visto.git\n\nImplementar login", None)
+    assert repo == "https://github.com/leotada/visto.git"
+    assert clean == "Implementar login"
+
+    repo, clean = parse_demand("Repositório: https://github.com/leotada/visto.git - Implementar login", None)
+    assert repo == "https://github.com/leotada/visto.git"
+    assert clean == "Implementar login"
+
+    repo, clean = parse_demand("Repo: https://github.com/leotada/visto.git Demanda: Implementar login", None)
+    assert repo == "https://github.com/leotada/visto.git"
+    assert clean == "Implementar login"
+
+    repo, clean = parse_demand("No repositório https://github.com/leotada/visto.git adicionar auth", None)
+    assert repo == "https://github.com/leotada/visto.git"
+    assert clean == "adicionar auth"
+
+    # Repo label before shorthand
+    repo, clean = parse_demand("repositório: owner/repo: Implementar login", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "Implementar login"
+
+    repo, clean = parse_demand("repo: owner/repo: Implementar login", None)
+    assert repo == "https://github.com/owner/repo.git"
+    assert clean == "Implementar login"
+
 
 @pytest.mark.anyio
 async def test_run_pipeline_ssh_no_token(monkeypatch):
@@ -525,6 +609,7 @@ def test_pipeline_config_steps():
     assert "Do NOT delete" in developer_prompt
 
     # Verify Code Reviewer prompt contents/expectations
+    assert PIPELINE_CONFIG[4]["timeout"] == "5m"
     reviewer_prompt = PIPELINE_CONFIG[4]["prompt"]
     assert "architect_plan.md" in reviewer_prompt
     assert "refactor_plan.md" in reviewer_prompt
@@ -580,7 +665,8 @@ async def test_pipeline_aborts_on_architect_review_failure(monkeypatch, tmp_path
          patch.object(os.path, "exists", side_effect=lambda p: abort_exists if "architect_abort" in str(p) else True):
         await telegram_listener.run_pipeline(
             mock_update, mock_context,
-            "git@github.com:owner/repo.git", "test demand"
+            "git@github.com:owner/repo.git", "test demand",
+            mode="hard"
         )
 
     # Should have stopped after step 2
@@ -786,6 +872,7 @@ async def test_run_pipeline_cancellation(monkeypatch):
     dummy_session = {
         "repo_url": "https://github.com/owner/repo.git",
         "demand": "test cancellation",
+        "mode": "hard",
         "git_branch": "feature/cancellation",
         "last_completed_step": "Architect (Planning - PLAN)",
         "steps_status": {
@@ -1566,4 +1653,162 @@ async def test_handle_demand_rejects_new_pipeline_when_active():
     assert "/stop" in mock_update.message.reply_text.call_args[0][0]
 
     telegram_listener.ACTIVE_TASKS.clear()
+
+
+@pytest.mark.anyio
+async def test_start_command_renders_guide():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+    mock_context = MagicMock()
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"):
+        await telegram_listener.start(mock_update, mock_context)
+
+    mock_update.message.reply_text.assert_called_once()
+    msg = mock_update.message.reply_text.call_args[0][0]
+    assert "Easy / Standard Mode" in msg
+    assert "Hard / Complex Mode" in msg
+    assert "Architect Reviewer" in msg
+
+
+@pytest.mark.anyio
+async def test_handle_demand_mode_routing():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_context = MagicMock()
+
+    # 1. Hard mode demand
+    mock_update_hard = AsyncMock()
+    mock_update_hard.effective_chat.id = 12345
+    mock_update_hard.message = AsyncMock()
+    mock_update_hard.message.text = "owner/repo: [hard] Add complex feature"
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.classify_intent", new_callable=AsyncMock, return_value="NEW_DEMAND"), \
+         patch("telegram_listener.load_session", return_value=None), \
+         patch("telegram_listener.run_pipeline", new_callable=AsyncMock) as mock_run:
+        await telegram_listener.handle_demand(mock_update_hard, mock_context)
+        mock_run.assert_called_once_with(
+            mock_update_hard, mock_context, "https://github.com/owner/repo.git", "Add complex feature", mode="hard", is_resume=False
+        )
+
+    # 2. Easy mode demand (explicit)
+    mock_update_easy = AsyncMock()
+    mock_update_easy.effective_chat.id = 12345
+    mock_update_easy.message = AsyncMock()
+    mock_update_easy.message.text = "owner/repo: [easy] Fix simple bug"
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.classify_intent", new_callable=AsyncMock, return_value="NEW_DEMAND"), \
+         patch("telegram_listener.load_session", return_value=None), \
+         patch("telegram_listener.run_pipeline", new_callable=AsyncMock) as mock_run:
+        await telegram_listener.handle_demand(mock_update_easy, mock_context)
+        mock_run.assert_called_once_with(
+            mock_update_easy, mock_context, "https://github.com/owner/repo.git", "Fix simple bug", mode="easy", is_resume=False
+        )
+
+    # 3. Default demand (implicit easy mode)
+    mock_update_default = AsyncMock()
+    mock_update_default.effective_chat.id = 12345
+    mock_update_default.message = AsyncMock()
+    mock_update_default.message.text = "owner/repo: Regular task"
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.classify_intent", new_callable=AsyncMock, return_value="NEW_DEMAND"), \
+         patch("telegram_listener.load_session", return_value=None), \
+         patch("telegram_listener.run_pipeline", new_callable=AsyncMock) as mock_run:
+        await telegram_listener.handle_demand(mock_update_default, mock_context)
+        mock_run.assert_called_once_with(
+            mock_update_default, mock_context, "https://github.com/owner/repo.git", "Regular task", mode="easy", is_resume=False
+        )
+
+
+@pytest.mark.anyio
+async def test_send_status_displays_mode_and_steps():
+    from unittest.mock import AsyncMock, patch
+    import telegram_listener
+
+    mock_update = AsyncMock()
+    mock_update.message = AsyncMock()
+    mock_update.message.reply_text = AsyncMock()
+
+    easy_session = {
+        "repo_url": "https://github.com/owner/repo.git",
+        "demand": "build feature",
+        "mode": "easy",
+        "git_branch": "feature/build-feature",
+        "last_completed_step": "Developer (Implementation - GREEN)",
+        "steps_status": {
+            "Architect (Planning - PLAN)": "success",
+            "Developer (Implementation - GREEN)": "success"
+        }
+    }
+
+    with patch("telegram_listener.load_session", return_value=easy_session), \
+         patch("telegram_listener.get_model_quota_summary", return_value=""):
+        await telegram_listener.send_status(mock_update)
+
+    msg = mock_update.message.reply_text.call_args[0][0]
+    assert "Mode:</b> <code>Easy (Fast)</code>" in msg
+    assert "Architect Reviewer" not in msg
+    assert "Code Reviewer (Review - PLAN)" in msg
+
+    hard_session = {
+        "repo_url": "https://github.com/owner/repo.git",
+        "demand": "complex refactor",
+        "mode": "hard",
+        "git_branch": "feature/complex-refactor",
+        "last_completed_step": "Architect Reviewer (Plan Validation - PLAN)",
+        "steps_status": {
+            "Architect (Planning - PLAN)": "success",
+            "Architect Reviewer (Plan Validation - PLAN)": "success"
+        }
+    }
+
+    mock_update.message.reply_text.reset_mock()
+    with patch("telegram_listener.load_session", return_value=hard_session), \
+         patch("telegram_listener.get_model_quota_summary", return_value=""):
+        await telegram_listener.send_status(mock_update)
+
+    msg_hard = mock_update.message.reply_text.call_args[0][0]
+    assert "Mode:</b> <code>Hard (Thorough Review)</code>" in msg_hard
+    assert "Architect Reviewer (Plan Validation - PLAN)" in msg_hard
+
+
+@pytest.mark.anyio
+async def test_handle_demand_user_reported_format():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import telegram_listener
+
+    mock_context = MagicMock()
+    mock_update = AsyncMock()
+    mock_update.effective_chat.id = 12345
+    mock_update.message = AsyncMock()
+    mock_update.message.text = (
+        "Difícil. Repositório  https://github.com/leotada/visto.git\n\n"
+        "Implementar funcionalidade de login via link mágico por e-mail. "
+        "Adicionar este método de autenticação além do método por usuário e senha."
+    )
+
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.classify_intent", new_callable=AsyncMock, return_value="NEW_DEMAND"), \
+         patch("telegram_listener.load_session", return_value=None), \
+         patch("telegram_listener.run_pipeline", new_callable=AsyncMock) as mock_run:
+        await telegram_listener.handle_demand(mock_update, mock_context)
+        mock_run.assert_called_once_with(
+            mock_update,
+            mock_context,
+            "https://github.com/leotada/visto.git",
+            "Implementar funcionalidade de login via link mágico por e-mail. Adicionar este método de autenticação além do método por usuário e senha.",
+            mode="hard",
+            is_resume=False
+        )
+
+
 
