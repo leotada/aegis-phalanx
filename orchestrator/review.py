@@ -6,6 +6,7 @@ import asyncio
 import html
 import os
 
+from orchestrator.memory_hooks import PipelineMemory
 from orchestrator.paths import PROJECT_DIR
 from orchestrator.workspace import clone_repository, remove_directory
 
@@ -33,6 +34,8 @@ async def execute_pr_review(update, context, repo_url: str, pr_number: int, ns) 
     github_token = os.environ.get("GITHUB_TOKEN")
     review_config = ns.resolve_review_pipeline_config()
     step = review_config[0]
+    memory = PipelineMemory(ns.get_memory_manager())
+    demand = f"Review pull request #{pr_number} in {repo_owner_name}"
 
     try:
         auth_repo_url, _auth_method, auth_error = await ns.resolve_clone_url(repo_url, github_token)
@@ -70,10 +73,21 @@ async def execute_pr_review(update, context, repo_url: str, pr_number: int, ns) 
             )
             return
 
+        await memory.begin(
+            cwd=project_dir,
+            project=repo_owner_name,
+            demand=demand,
+            git_branch=f"pr-{pr_number}",
+            is_resume=False,
+        )
+
         prompt_content = step["prompt"].format(
             pr_number=pr_number,
             repo_owner_name=repo_owner_name,
             pr_context=await ns.fetch_pr_context(repo_owner_name, pr_number, project_dir),
+        )
+        prompt_content = await memory.enrich(
+            prompt_content, demand=demand, step_name=step["step_name"]
         )
 
         agent_cli = ns.AgentRegistry.get_agent(step["tool"])
@@ -88,6 +102,12 @@ async def execute_pr_review(update, context, repo_url: str, pr_number: int, ns) 
         returncode, stdout_str, stderr_str = await ns.run_command_and_stream(command, cwd=project_dir)
 
         if returncode != 0:
+            await memory.fail(
+                step_name=step["step_name"],
+                status="failed",
+                git_changes="",
+                stdout="\n".join(part for part in (stdout_str, stderr_str) if part),
+            )
             error_msg = f"❌ <b>PR review failed.</b>\n\n"
             if stderr_str.strip():
                 error_msg += f"<b>Stderr:</b>\n<pre>{html.escape(stderr_str[:800])}</pre>\n\n"
@@ -98,18 +118,33 @@ async def execute_pr_review(update, context, repo_url: str, pr_number: int, ns) 
 
         review_text = stdout_str.strip()
         if not review_text:
+            await memory.fail(
+                step_name=step["step_name"],
+                status="failed",
+                git_changes="",
+                stdout="",
+            )
             await update.message.reply_text("❌ PR review returned no output.")
             return
 
+        await memory.record(
+            step_name=step["step_name"],
+            status="success",
+            git_changes="",
+            stdout=review_text,
+        )
+        await memory.finish("success")
         await ns._send_review_text(update, review_text)
 
     except asyncio.CancelledError:
+        await memory.finish("stopped")
         await update.message.reply_text(
             "🛑 <b>PR review stopped.</b>",
             parse_mode="HTML",
         )
         raise
     except Exception as e:
+        await memory.finish("failed")
         await update.message.reply_text(f"❌ PR review error: {html.escape(str(e))}", parse_mode="HTML")
     finally:
         if ns.ACTIVE_TASKS.get(chat_id) == current_task:

@@ -31,6 +31,7 @@ from agents import (
     resolve_review_pipeline_config,
 )
 from agents.config import AGENT_INTENT_TIMEOUT
+from agents.memory_manager import get_memory_manager, memory_status_label
 from agents.tool_specs import get_tool_spec
 from orchestrator.env import sanitize_environment
 from orchestrator.github import (
@@ -330,7 +331,8 @@ async def send_status(update: Update):
         f"⚙️ <b>Mode:</b> <code>{label}</code>\n"
         f"💡 <b>Demand:</b> <code>{html.escape(session.get('demand', 'N/A'))}</code>\n"
         f"🌿 <b>Branch:</b> <code>{session.get('git_branch', 'N/A')}</code>\n"
-        f"🏁 <b>Last Completed:</b> <code>{session.get('last_completed_step', 'N/A')}</code>\n\n"
+        f"🏁 <b>Last Completed:</b> <code>{session.get('last_completed_step', 'N/A')}</code>\n"
+        f"🧠 <b>ai-memory:</b> <code>{html.escape(memory_status_label())}</code>\n\n"
     )
     if quota_section:
         status_msg += quota_section
@@ -364,6 +366,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/clear</code> - Clear active session memory\n"
             "• <code>/review owner/repo#123</code> - Review an existing GitHub PR"
         )
+        memory_label = memory_status_label()
+        if memory_label != "off":
+            start_message += (
+                f"\n\n🧠 <b>ai-memory:</b> <code>{html.escape(memory_label)}</code> "
+                "(orchestrator injects wiki context between steps; agents do not manage memory)"
+            )
         await update.message.reply_text(start_message, parse_mode="HTML")
 
 

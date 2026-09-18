@@ -30,4 +30,4 @@ status:
 	podman compose --env-file .env $(COMPOSE_FILES) ps
 
 test:
-	python3 -m pytest test_agents.py test_tool_infrastructure.py test_telegram_listener.py test_coverage_boost.py -q -k 'not trio' --cov --cov-report=term-missing
+	python3 -m pytest test_agents.py test_tool_infrastructure.py test_telegram_listener.py test_coverage_boost.py test_memory_manager.py -q -k 'not trio' --cov --cov-report=term-missing

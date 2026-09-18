@@ -25,6 +25,8 @@ services:
       dockerfile: Containerfile
       args:
         AGENT_TOOL: ${AGENT_TOOL:-agy}
+        INSTALL_AI_MEMORY: ${INSTALL_AI_MEMORY:-false}
+        AI_MEMORY_VERSION: ${AI_MEMORY_VERSION:-v2.3.1}
     container_name: agent_workspace
     security_opt:
       - label=disable
@@ -38,6 +40,10 @@ services:
       - AGENT_STEP_TIMEOUT=${AGENT_STEP_TIMEOUT:-5m}
       - AGENT_INTENT_TIMEOUT=${AGENT_INTENT_TIMEOUT:-15s}
       - AGENT_TOOL=${AGENT_TOOL:-agy}
+      - AI_MEMORY_ENABLED=${AI_MEMORY_ENABLED:-false}
+      - AI_MEMORY_DATA_DIR=/root/.config/aegis-phalanx/ai-memory
+      - AI_MEMORY_SERVER_URL=http://127.0.0.1:49374
+      - AI_MEMORY_WORKSPACE=aegis-phalanx
       - SSH_AUTH_SOCK=${SSH_AUTH_SOCK}
       - DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}
       - GIT_SSH_COMMAND=ssh -i /root/.ssh/id_aegis -o IdentitiesOnly=yes
