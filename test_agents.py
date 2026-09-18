@@ -339,3 +339,13 @@ async def test_classify_intent_uses_cursor_when_configured():
 def test_get_model_quota_summary_empty_when_tool_has_no_quota():
     with patch("telegram_listener.DEFAULT_AGENT_TOOL", "cursor"):
         assert get_model_quota_summary() == ""
+
+
+def test_env_flag_exported_from_agents(monkeypatch):
+    from agents import env_flag, get_memory_manager, memory_status_label
+
+    monkeypatch.delenv("AI_MEMORY_ENABLED", raising=False)
+    assert env_flag("AI_MEMORY_ENABLED") is False
+    assert memory_status_label() == "off"
+    manager = get_memory_manager()
+    assert manager.enabled is False

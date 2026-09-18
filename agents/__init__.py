@@ -3,7 +3,13 @@ from agents.adapters.aider import AiderAgentCLI
 from agents.adapters.claude import ClaudeCodeAgentCLI
 from agents.adapters.cursor import CursorAgentCLI
 from agents.base import AgentCLI
-from agents.config import AGENT_INTENT_TIMEOUT, AGENT_STEP_TIMEOUT, DEFAULT_AGENT_TOOL
+from agents.config import AGENT_INTENT_TIMEOUT, AGENT_STEP_TIMEOUT, DEFAULT_AGENT_TOOL, env_flag
+from agents.memory_manager import (
+    get_memory_manager,
+    is_ai_memory_enabled,
+    memory_status_label,
+    reset_memory_manager_cache,
+)
 from agents.pipeline import (
     DEFAULT_PIPELINE_MODE,
     MODE_EASY,
@@ -47,4 +53,9 @@ __all__ = [
     "get_registered_tools",
     "get_tool_spec",
     "validate_tool",
+    "env_flag",
+    "get_memory_manager",
+    "is_ai_memory_enabled",
+    "memory_status_label",
+    "reset_memory_manager_cache",
 ]

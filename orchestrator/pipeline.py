@@ -6,6 +6,7 @@ import asyncio
 import html
 import os
 
+from orchestrator.memory_hooks import PipelineMemory
 from orchestrator.paths import PROJECT_DIR
 from orchestrator.pipeline_steps import (
     branch_name_from_demand,
@@ -161,6 +162,7 @@ async def execute_pipeline(update, context, repo_url: str, demand: str, mode: st
     pipeline_config = []
     steps_status = {}
     git_branch = ""
+    memory = PipelineMemory(ns.get_memory_manager())
     try:
         github_token = os.environ.get("GITHUB_TOKEN")
         session = await _load_or_start_session(update, repo_url, demand, mode, is_resume, ns)
@@ -181,6 +183,14 @@ async def execute_pipeline(update, context, repo_url: str, demand: str, mode: st
             return
         project_dir, is_resume, start_index = prepared
 
+        await memory.begin(
+            cwd=project_dir,
+            project=ns.extract_owner_repo(repo_url) or repo_url,
+            demand=demand,
+            git_branch=git_branch,
+            is_resume=is_resume,
+        )
+
         for idx in range(start_index, len(pipeline_config)):
             step = pipeline_config[idx]
             step_name = step["step_name"]
@@ -194,6 +204,7 @@ async def execute_pipeline(update, context, repo_url: str, demand: str, mode: st
                 mode=mode,
                 steps_status=steps_status,
                 pipeline_config=pipeline_config,
+                memory=memory,
                 ns=ns,
                 project_dir=project_dir,
             )
@@ -214,18 +225,26 @@ async def execute_pipeline(update, context, repo_url: str, demand: str, mode: st
                 "⚠️ Could not confirm PR URL — check the repository manually or use <code>/status</code> to review completed steps.",
                 parse_mode="HTML",
             )
+        await memory.finish("success")
         ns.clear_session()
     except asyncio.CancelledError:
         if step_name:
             steps_status[step_name] = "failed"
             last_completed = last_completed_step_name(idx, step_name, pipeline_config)
             ns.save_session(repo_url, demand, last_completed, steps_status, git_branch, mode=mode)
+            await memory.fail(
+                step_name=step_name,
+                status="stopped",
+                git_changes=ns.get_git_changes(),
+                stdout="",
+            )
             await update.message.reply_text(
                 f"🛑 <b>Pipeline stopped in step:</b> <code>{step_name}</code>\n"
                 "You can resume later with <code>/continue</code>.",
                 parse_mode="HTML",
             )
         else:
+            await memory.finish("stopped")
             await update.message.reply_text("🛑 Pipeline stopped during initialization.")
         raise
     finally:

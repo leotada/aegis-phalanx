@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import re
 
+from orchestrator.memory_hooks import PipelineMemory
 from orchestrator.paths import PROJECT_DIR
 from orchestrator.workspace import read_abort_reason
 
@@ -69,6 +70,7 @@ async def execute_pipeline_step(
     mode: str,
     steps_status: dict,
     pipeline_config: list[dict],
+    memory: PipelineMemory,
     ns,
     project_dir: str = PROJECT_DIR,
 ) -> str:
@@ -84,6 +86,7 @@ async def execute_pipeline_step(
         demand=demand,
         repo_owner_name=ns.extract_owner_repo(repo_url) or repo_url,
     )
+    prompt_content = await memory.enrich(prompt_content, demand=demand, step_name=step_name)
 
     try:
         agent_cli = ns.AgentRegistry.get_agent(step["tool"])
@@ -99,6 +102,12 @@ async def execute_pipeline_step(
             await persist_step(
                 ns, repo_url, demand, step_name, idx, steps_status, git_branch, mode, pipeline_config, "failed"
             )
+            await memory.fail(
+                step_name=step_name,
+                status="failed",
+                git_changes=ns.get_git_changes(),
+                stdout="\n".join(part for part in (stdout_str, stderr_str) if part),
+            )
             error_msg = f"⚠️ <b>Failure in step {step_name}:</b>\n\n"
             if stderr_str.strip():
                 error_msg += f"<b>Stderr:</b>\n<pre>{html.escape(stderr_str[:800])}</pre>\n\n"
@@ -111,6 +120,12 @@ async def execute_pipeline_step(
         if abort_reason is not None:
             await persist_step(
                 ns, repo_url, demand, step_name, idx, steps_status, git_branch, mode, pipeline_config, "aborted"
+            )
+            await memory.fail(
+                step_name=step_name,
+                status="aborted",
+                git_changes=ns.get_git_changes(),
+                stdout=abort_reason,
             )
             await update.message.reply_text(
                 f"🚫 <b>Pipeline Aborted by Architect Review:</b>\n\n"
@@ -125,6 +140,12 @@ async def execute_pipeline_step(
         pytest_sum = ns.get_pytest_summary(stdout_str)
         git_changes = ns.get_git_changes()
         pr_url = ns.get_pr_url()
+        await memory.record(
+            step_name=step_name,
+            status="success",
+            git_changes=git_changes,
+            stdout=stdout_str,
+        )
         await update.message.reply_text(
             format_step_summary(
                 step_name,
@@ -140,6 +161,12 @@ async def execute_pipeline_step(
     except Exception as e:
         await persist_step(
             ns, repo_url, demand, step_name, idx, steps_status, git_branch, mode, pipeline_config, "failed"
+        )
+        await memory.fail(
+            step_name=step_name,
+            status="failed",
+            git_changes=ns.get_git_changes(),
+            stdout=str(e),
         )
         await update.message.reply_text(f"❌ System error in step {step_name}: {str(e)}")
         return "failed"
