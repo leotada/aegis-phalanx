@@ -292,7 +292,8 @@ The review text is returned to Telegram only — no commits, file changes, or Gi
 ## Architecture
 
 ```
-telegram_listener.py   # Telegram bot and pipeline orchestrator
+telegram_listener.py   # Telegram bot composition root (handlers + wiring)
+orchestrator/          # Pipeline, review, git, process, and parsing helpers
 agents/
   adapters/            # CLI adapters (agy, cursor, claude, aider)
   pipeline.py          # TDD step definitions

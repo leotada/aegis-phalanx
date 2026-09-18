@@ -1335,7 +1335,7 @@ async def test_handle_review_unauthorized():
 def test_clear_session_write_error_with_repo(tmp_path):
     from telegram_listener import clear_session
     session_file = tmp_path / "session.json"
-    with patch("telegram_listener.load_session", return_value={"repo_url": "https://github.com/o/r.git"}), \
+    with patch("orchestrator.session.load_session", return_value={"repo_url": "https://github.com/o/r.git"}), \
          patch("builtins.open", side_effect=OSError("write error")):
         clear_session(str(session_file))
 

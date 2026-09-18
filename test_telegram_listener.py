@@ -1450,9 +1450,9 @@ def test_terminate_process_tree_sends_sigterm():
     mock_process = MagicMock()
     mock_process.pid = 4242
 
-    with patch("telegram_listener.os.getpgrp", return_value=9999), \
-         patch("telegram_listener.os.getpgid", return_value=4242) as mock_getpgid, \
-         patch("telegram_listener.os.killpg") as mock_killpg:
+    with patch("orchestrator.process.os.getpgrp", return_value=9999), \
+         patch("orchestrator.process.os.getpgid", return_value=4242) as mock_getpgid, \
+         patch("orchestrator.process.os.killpg") as mock_killpg:
         telegram_listener._terminate_process_tree(mock_process)
 
     mock_getpgid.assert_called_once_with(4242)
@@ -1467,9 +1467,9 @@ def test_terminate_process_tree_sends_sigkill_when_forced():
     mock_process = MagicMock()
     mock_process.pid = 4242
 
-    with patch("telegram_listener.os.getpgrp", return_value=9999), \
-         patch("telegram_listener.os.getpgid", return_value=4242), \
-         patch("telegram_listener.os.killpg") as mock_killpg:
+    with patch("orchestrator.process.os.getpgrp", return_value=9999), \
+         patch("orchestrator.process.os.getpgid", return_value=4242), \
+         patch("orchestrator.process.os.killpg") as mock_killpg:
         telegram_listener._terminate_process_tree(mock_process, force=True)
 
     mock_killpg.assert_called_once_with(4242, signal.SIGKILL)
@@ -1483,9 +1483,9 @@ def test_terminate_process_tree_falls_back_when_same_pgrp():
     mock_process.pid = 4242
     mock_process.terminate = MagicMock()
 
-    with patch("telegram_listener.os.getpgrp", return_value=4242), \
-         patch("telegram_listener.os.getpgid", return_value=4242), \
-         patch("telegram_listener.os.killpg") as mock_killpg:
+    with patch("orchestrator.process.os.getpgrp", return_value=4242), \
+         patch("orchestrator.process.os.getpgid", return_value=4242), \
+         patch("orchestrator.process.os.killpg") as mock_killpg:
         telegram_listener._terminate_process_tree(mock_process)
 
     mock_killpg.assert_not_called()
@@ -1556,7 +1556,7 @@ async def test_run_pr_review_cancelled_during_clone(monkeypatch):
     with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
          patch("asyncio.create_subprocess_exec", return_value=clone_process), \
          patch("os.path.exists", return_value=False), \
-         patch.object(telegram_listener, "_terminate_process_tree") as mock_terminate:
+         patch("orchestrator.process.terminate_process_tree") as mock_terminate:
         task = asyncio.create_task(
             telegram_listener.run_pr_review(
                 mock_update, mock_context, "git@github.com:owner/repo.git", 42
