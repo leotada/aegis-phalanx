@@ -13,8 +13,18 @@ ENV PATH="/root/.local/bin:/usr/local/bin:$PATH"
 ARG AGENT_TOOL=agy
 ENV AGENT_TOOL=${AGENT_TOOL}
 
-COPY agents/tool_specs.py scripts/install_agent_tool.py /tmp/agent-install/
-RUN AGENT_TOOL=${AGENT_TOOL} python3 /tmp/agent-install/install_agent_tool.py \
+COPY agents/tool_specs.py scripts/install_agent_tool.py scripts/install_ai_memory.py /tmp/agent-install/
+RUN AGENT_TOOL=${AGENT_TOOL} python3 /tmp/agent-install/install_agent_tool.py
+
+# Optional long-term wiki memory for pipeline handoffs (off unless opted in).
+ARG INSTALL_AI_MEMORY=false
+ARG AI_MEMORY_VERSION=v2.3.1
+RUN flag=$(printf '%s' "$INSTALL_AI_MEMORY" | tr '[:upper:]' '[:lower:]'); \
+    if [ "$flag" = "true" ] || [ "$flag" = "1" ] || [ "$flag" = "yes" ] || [ "$flag" = "on" ]; then \
+      AI_MEMORY_VERSION=${AI_MEMORY_VERSION} python3 /tmp/agent-install/install_ai_memory.py; \
+    else \
+      echo "Skipping optional ai-memory install"; \
+    fi \
     && rm -rf /tmp/agent-install
 
 # Install Telegram bot libraries and testing frameworks

@@ -9,6 +9,7 @@ An isolated, multi-agent TDD (Test-Driven Development) pipeline controlled via a
 - **TDD Workflow**: Enforces tests first — production code is only added to satisfy failing tests (Red-Green-Refactor).
 - **Pluggable Agent CLI**: Select the tool via `AGENT_TOOL` in `.env`. The image installs only that CLI; volume mounts and auth are generated automatically.
 - **Flexible Git Authentication**: HTTPS cloning (`GITHUB_TOKEN`) or SSH cloning (dedicated key mounted read-only into the container).
+- **Optional project wiki (`ai-memory`)**: Off by default. When enabled, the orchestrator injects and records pipeline context via the `ai-memory` CLI — agents are not asked to manage memory tools.
 - **Multi-Model Orchestration**: Configurable TDD pipeline supporting two operational modes:
   - ⚡ **Easy Mode** (Default — for standard tasks): Skips the Architect Reviewer validation and sets Code Reviewer reasoning budget to `medium` for faster execution.
   - 🛡️ **Hard Mode** (for complex/difficult tasks): Runs full 7-step pipeline with Architect Reviewer validation (`gemini-3.1-pro`, `high` reasoning) and Code Reviewer with `high` reasoning.
@@ -61,6 +62,8 @@ TELEGRAM_BOT_TOKEN=12345:AABBBCCC
 TELEGRAM_CHAT_ID=your_chat_id_here
 DEFAULT_REPO=owner/repo               # Optional default repository
 AGENT_TOOL=cursor                     # agy | cursor | claude | aider
+AI_MEMORY_ENABLED=false               # Optional wiki memory between pipeline steps
+INSTALL_AI_MEMORY=false               # Download the ai-memory binary at image build
 ```
 
 Changing `AGENT_TOOL` requires a rebuild: `make build`.
@@ -249,6 +252,25 @@ The bot classifies intent using the active `AGENT_TOOL` CLI:
 
 Model quota usage (`/status`) is shown only when `AGENT_TOOL=agy`.
 
+### Optional ai-memory wiki (off by default)
+
+The orchestrator can keep a long-term project wiki with [ai-memory](https://github.com/akitaonrails/ai-memory) **without** installing MCP/hooks into `agy`/`claude`/`cursor`. Python owns capture and prompt injection. Failures in the memory layer never abort the TDD pipeline.
+
+This is separate from Aegis session JSON (`/status`, `/continue`), which only tracks pipeline step progress.
+
+Enable both flags and rebuild:
+
+```env
+AI_MEMORY_ENABLED=true
+INSTALL_AI_MEMORY=true
+```
+
+```bash
+make build
+```
+
+Wiki data is stored on the existing `~/.config/aegis-phalanx` host mount (`/root/.config/aegis-phalanx/ai-memory` in the container), not inside the cloned repository, so GitOps will not commit it. The pipeline progress page keeps the last step's files and output when the run finishes. PR review writes `notes/pr-review-progress.md` so it does not replace that snapshot.
+
 ---
 
 ## PR review (`/review`)
@@ -296,11 +318,13 @@ telegram_listener.py   # Telegram bot composition root (handlers + wiring)
 orchestrator/          # Pipeline, review, git, process, and parsing helpers
 agents/
   adapters/            # CLI adapters (agy, cursor, claude, aider)
+  memory/              # Optional ai-memory middleware (off by default)
   pipeline.py          # TDD step definitions
   review_pipeline.py   # PR review step definition
   registry.py          # Agent factory
   tool_specs.py        # Per-tool install commands and volume mounts
 scripts/
   install_agent_tool.py       # Containerfile install helper
+  install_ai_memory.py        # Optional ai-memory binary installer
   render_compose_overlay.py   # Generates compose.tool.yml from .env
 ```

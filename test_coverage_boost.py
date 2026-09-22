@@ -1483,3 +1483,129 @@ async def test_handle_demand_active_pipeline_rejection_new_demand():
     telegram_listener.ACTIVE_TASKS.clear()
 
 
+class _FakeMemory:
+    enabled = True
+
+    def __init__(self):
+        self.events = []
+        self.prompts = []
+
+    async def begin_run(self, **kwargs):
+        self.events.append(("begin", kwargs))
+
+    async def enrich_prompt(self, prompt, **kwargs):
+        enriched = f"MEMORY_CTX\n{prompt}"
+        self.prompts.append(enriched)
+        return enriched
+
+    async def after_step(self, **kwargs):
+        self.events.append(("after", kwargs))
+
+    async def end_run(self, **kwargs):
+        self.events.append(("end", kwargs))
+
+
+@pytest.mark.anyio
+async def test_run_pipeline_optional_memory_hooks(monkeypatch):
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    mock_update = _mock_update()
+    fake = _FakeMemory()
+    captured = []
+
+    async def fake_run(command, cwd=None):
+        captured.append(command)
+        return (0, "plain output", "")
+
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate = AsyncMock(return_value=(b"", b""))
+    mock_process.wait = AsyncMock(return_value=0)
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "run_command_and_stream", side_effect=fake_run), \
+         patch.object(telegram_listener, "get_git_changes", return_value="• `main.py` (M)"), \
+         patch.object(telegram_listener, "get_pytest_summary", return_value=""), \
+         patch.object(telegram_listener, "get_pr_url", return_value="https://github.com/o/r/pull/2"), \
+         patch.object(telegram_listener, "get_memory_manager", return_value=fake):
+        await telegram_listener.run_pipeline(
+            mock_update, MagicMock(), "git@github.com:o/r.git", "demand", is_resume=False
+        )
+
+    assert any(event[0] == "begin" for event in fake.events)
+    assert any(event[0] == "after" and event[1]["status"] == "success" for event in fake.events)
+    assert any(event[0] == "end" and event[1]["status"] == "success" for event in fake.events)
+    assert fake.prompts
+    assert any("MEMORY_CTX" in str(command) for command in captured)
+
+
+@pytest.mark.anyio
+async def test_run_pipeline_memory_on_step_failure(monkeypatch):
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    mock_update = _mock_update()
+    fake = _FakeMemory()
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate = AsyncMock(return_value=(b"", b""))
+    mock_process.wait = AsyncMock(return_value=0)
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "run_command_and_stream", return_value=(1, "out", "err")), \
+         patch.object(telegram_listener, "get_memory_manager", return_value=fake):
+        await telegram_listener.run_pipeline(
+            mock_update, MagicMock(), "git@github.com:o/r.git", "demand", is_resume=False
+        )
+
+    assert any(event[0] == "after" and event[1]["status"] == "failed" for event in fake.events)
+    assert any(event[0] == "end" and event[1]["status"] == "failed" for event in fake.events)
+
+
+@pytest.mark.anyio
+async def test_start_mentions_ai_memory_when_enabled():
+    import telegram_listener
+
+    mock_update = _mock_update()
+    with patch("telegram_listener.ALLOWED_CHAT_ID", "12345"), \
+         patch("telegram_listener.memory_status_label", return_value="on"):
+        await telegram_listener.start(mock_update, MagicMock())
+    message = mock_update.message.reply_text.call_args[0][0]
+    assert "ai-memory" in message
+    assert "on" in message
+
+
+@pytest.mark.anyio
+async def test_run_pr_review_optional_memory_hooks(monkeypatch):
+    import telegram_listener
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    mock_update = _mock_update()
+    fake = _FakeMemory()
+    mock_process = AsyncMock()
+    mock_process.returncode = 0
+    mock_process.communicate = AsyncMock(return_value=(b"", b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(telegram_listener, "fetch_pr_context", new_callable=AsyncMock, return_value="PR context"), \
+         patch.object(telegram_listener, "run_command_and_stream", return_value=(0, "No actionable issues found.", "")), \
+         patch.object(telegram_listener, "get_memory_manager", return_value=fake):
+        await telegram_listener.run_pr_review(
+            mock_update, MagicMock(), "git@github.com:owner/repo.git", 7
+        )
+
+    assert any(event[0] == "begin" for event in fake.events)
+    assert any(
+        event[0] == "begin" and event[1].get("page_path", "").endswith("pr-review-progress.md")
+        for event in fake.events
+    )
+    assert any(event[0] == "after" and event[1]["status"] == "success" for event in fake.events)
+    assert any(event[0] == "end" and event[1]["status"] == "success" for event in fake.events)
+    assert fake.prompts
+    assert "MEMORY_CTX" in fake.prompts[0]
+
+
