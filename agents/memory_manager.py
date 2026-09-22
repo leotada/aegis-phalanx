@@ -6,6 +6,8 @@ used by the orchestrator and tests.
 
 from __future__ import annotations
 
+import atexit
+
 from agents.memory import (
     AIMemoryManager,
     DEFAULT_BINARY,
@@ -18,6 +20,7 @@ from agents.memory import (
     MEMORY_PREAMBLE,
     MemoryMiddleware,
     PROGRESS_PAGE_PATH,
+    REVIEW_PAGE_PATH,
     SEARCH_HIT_LIMIT,
     ai_memory_binary,
     clip_text,
@@ -35,11 +38,25 @@ _CACHED_MANAGER: MemoryMiddleware | None = None
 _MISSING_BINARY_WARNED = False
 
 
+def _stop_cached_serve() -> None:
+    manager = _CACHED_MANAGER
+    stop = getattr(manager, "stop_serve", None)
+    if stop is not None:
+        stop()
+
+
 def reset_memory_manager_cache() -> None:
     """Drops the cached live manager (tests and process shutdown)."""
     global _CACHED_MANAGER, _MISSING_BINARY_WARNED
+    manager = _CACHED_MANAGER
     _CACHED_MANAGER = None
     _MISSING_BINARY_WARNED = False
+    stop = getattr(manager, "stop_serve", None)
+    if stop is not None:
+        stop()
+
+
+atexit.register(_stop_cached_serve)
 
 
 def get_memory_manager() -> MemoryMiddleware:
@@ -73,6 +90,7 @@ __all__ = [
     "MEMORY_PREAMBLE",
     "MemoryMiddleware",
     "PROGRESS_PAGE_PATH",
+    "REVIEW_PAGE_PATH",
     "SEARCH_HIT_LIMIT",
     "ai_memory_binary",
     "clip_text",

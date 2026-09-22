@@ -16,6 +16,7 @@ class MemoryMiddleware:
         demand: str,
         git_branch: str,
         is_resume: bool = False,
+        page_path: str | None = None,
     ) -> None:
         return None
 

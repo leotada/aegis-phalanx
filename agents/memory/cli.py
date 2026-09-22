@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 
 
 class MemoryCliMixin:
@@ -87,3 +88,18 @@ class MemoryCliMixin:
             )
         finally:
             log_file.close()
+
+    def stop_serve(self) -> None:
+        """Stops the serve process this manager started. Safe to call more than once."""
+        proc = self._serve_proc
+        self._serve_proc = None
+        self._ready = False
+        if proc is None or proc.returncode is not None:
+            return
+        pid = getattr(proc, "pid", None)
+        if not isinstance(pid, int) or pid <= 0:
+            return
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass

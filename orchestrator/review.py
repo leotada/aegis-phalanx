@@ -6,6 +6,7 @@ import asyncio
 import html
 import os
 
+from agents.memory.settings import REVIEW_PAGE_PATH
 from orchestrator.memory_hooks import PipelineMemory
 from orchestrator.paths import PROJECT_DIR
 from orchestrator.workspace import clone_repository, remove_directory
@@ -79,6 +80,7 @@ async def execute_pr_review(update, context, repo_url: str, pr_number: int, ns) 
             demand=demand,
             git_branch=f"pr-{pr_number}",
             is_resume=False,
+            page_path=REVIEW_PAGE_PATH,
         )
 
         prompt_content = step["prompt"].format(

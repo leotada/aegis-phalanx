@@ -1599,6 +1599,10 @@ async def test_run_pr_review_optional_memory_hooks(monkeypatch):
         )
 
     assert any(event[0] == "begin" for event in fake.events)
+    assert any(
+        event[0] == "begin" and event[1].get("page_path", "").endswith("pr-review-progress.md")
+        for event in fake.events
+    )
     assert any(event[0] == "after" and event[1]["status"] == "success" for event in fake.events)
     assert any(event[0] == "end" and event[1]["status"] == "success" for event in fake.events)
     assert fake.prompts

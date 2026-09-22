@@ -19,7 +19,8 @@ RUN AGENT_TOOL=${AGENT_TOOL} python3 /tmp/agent-install/install_agent_tool.py
 # Optional long-term wiki memory for pipeline handoffs (off unless opted in).
 ARG INSTALL_AI_MEMORY=false
 ARG AI_MEMORY_VERSION=v2.3.1
-RUN if [ "$INSTALL_AI_MEMORY" = "true" ] || [ "$INSTALL_AI_MEMORY" = "1" ] || [ "$INSTALL_AI_MEMORY" = "yes" ] || [ "$INSTALL_AI_MEMORY" = "on" ]; then \
+RUN flag=$(printf '%s' "$INSTALL_AI_MEMORY" | tr '[:upper:]' '[:lower:]'); \
+    if [ "$flag" = "true" ] || [ "$flag" = "1" ] || [ "$flag" = "yes" ] || [ "$flag" = "on" ]; then \
       AI_MEMORY_VERSION=${AI_MEMORY_VERSION} python3 /tmp/agent-install/install_ai_memory.py; \
     else \
       echo "Skipping optional ai-memory install"; \

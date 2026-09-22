@@ -269,7 +269,7 @@ INSTALL_AI_MEMORY=true
 make build
 ```
 
-Wiki data is stored on the existing `~/.config/aegis-phalanx` host mount (`/root/.config/aegis-phalanx/ai-memory` in the container), not inside the cloned repository, so GitOps will not commit it.
+Wiki data is stored on the existing `~/.config/aegis-phalanx` host mount (`/root/.config/aegis-phalanx/ai-memory` in the container), not inside the cloned repository, so GitOps will not commit it. The pipeline progress page keeps the last step's files and output when the run finishes. PR review writes `notes/pr-review-progress.md` so it does not replace that snapshot.
 
 ---
 

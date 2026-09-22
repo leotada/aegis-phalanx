@@ -15,9 +15,14 @@ class MemoryProgressMixin:
     _project: str
     _demand: str
     _git_branch: str
+    _page_path: str
+    _last_snapshot: tuple[str, str, str, str] | None
 
     def _scope_args(self) -> list[str]:
         return ["--workspace", self.workspace, "--project", self._project]
+
+    def _progress_page(self) -> str:
+        return getattr(self, "_page_path", "") or PROGRESS_PAGE_PATH
 
     def _search_query(self, demand: str) -> str:
         cleaned = re.sub(r"['\"]", " ", demand or "").strip()
@@ -30,13 +35,16 @@ class MemoryProgressMixin:
         status: str,
         git_changes: str,
         stdout: str,
+        run_status: str = "",
     ) -> str:
         files = git_changes.strip() or "(no tracked file changes)"
         output_tail = clip_text((stdout or "").strip(), 1500) or "(no console output)"
+        run_line = f"- Run: {run_status}\n" if run_status else ""
         return (
             f"# Pipeline progress: {self._git_branch or 'unspecified-branch'}\n\n"
             f"- Demand: {self._demand or '(none)'}\n"
             f"- Branch: `{self._git_branch or 'n/a'}`\n"
+            f"{run_line}"
             f"- Last step: {step_name} ({status})\n"
             f"- Project: `{self._project}`\n\n"
             f"## Files changed\n\n{files}\n\n"
@@ -45,7 +53,7 @@ class MemoryProgressMixin:
 
     async def _read_progress(self) -> str:
         code, stdout, _ = await self._run_cli(
-            ["read-page", "--path", PROGRESS_PAGE_PATH, *self._scope_args()]
+            ["read-page", "--path", self._progress_page(), *self._scope_args()]
         )
         if code != 0:
             return ""
@@ -68,18 +76,21 @@ class MemoryProgressMixin:
         status: str,
         git_changes: str,
         stdout: str,
+        run_status: str = "",
     ) -> None:
+        self._last_snapshot = (step_name, status, git_changes, stdout)
         body = self._build_progress_body(
             step_name=step_name,
             status=status,
             git_changes=git_changes,
             stdout=stdout,
+            run_status=run_status,
         )
         code, _, err = await self._run_cli(
             [
                 "write-page",
                 "--path",
-                PROGRESS_PAGE_PATH,
+                self._progress_page(),
                 "--body",
                 body,
                 "--kind",

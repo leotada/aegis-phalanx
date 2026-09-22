@@ -17,6 +17,7 @@ from agents.memory.settings import (
     DEFAULT_SERVER_URL,
     DEFAULT_WORKSPACE,
     MEMORY_PREAMBLE,
+    PROGRESS_PAGE_PATH,
     ai_memory_binary,
 )
 from agents.memory.text import clip_text, project_slug
@@ -76,6 +77,8 @@ class AIMemoryManager(
         self._demand = ""
         self._git_branch = ""
         self._begun = False
+        self._page_path = PROGRESS_PAGE_PATH
+        self._last_snapshot = None
 
     async def begin_run(
         self,
@@ -85,12 +88,15 @@ class AIMemoryManager(
         demand: str,
         git_branch: str,
         is_resume: bool = False,
+        page_path: str | None = None,
     ) -> None:
         try:
             self._cwd = cwd
             self._project = project_slug(project)
             self._demand = demand
             self._git_branch = git_branch
+            self._page_path = page_path or PROGRESS_PAGE_PATH
+            self._last_snapshot = None
             if not await self.ensure_ready():
                 return
             self._begun = True
@@ -144,7 +150,17 @@ class AIMemoryManager(
                 return
             if not await self.ensure_ready():
                 return
-            await self._write_progress("Pipeline finished", status, "", "")
+            if self._last_snapshot is None:
+                step_name, step_status, git_changes, stdout = "Pipeline finished", status, "", ""
+            else:
+                step_name, step_status, git_changes, stdout = self._last_snapshot
+            await self._write_progress(
+                step_name,
+                step_status,
+                git_changes,
+                stdout,
+                run_status=status,
+            )
             self._begun = False
         except Exception as exc:
             print(f"ai-memory end_run failed: {exc}", flush=True)

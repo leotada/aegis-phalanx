@@ -13,6 +13,7 @@ from agents.memory_manager import (
     DisabledMemoryManager,
     MEMORY_PREAMBLE,
     PROGRESS_PAGE_PATH,
+    REVIEW_PAGE_PATH,
     clip_text,
     env_float,
     env_int,
@@ -289,6 +290,11 @@ async def test_begin_enrich_after_end_flow(tmp_path):
         assert manager._begun is False
         write_calls = [call.args[0] for call in run_cli.await_args_list if call.args[0][:1] == ["write-page"]]
         assert any(PROGRESS_PAGE_PATH in cmd for cmd in write_calls)
+        final_body = write_calls[-1][write_calls[-1].index("--body") + 1]
+        assert "Last step: RED (success)" in final_body
+        assert "• a.py" in final_body
+        assert "Run: success" in final_body
+        assert "Pipeline finished" not in final_body
 
     manager._begun = False
     with patch.object(manager, "ensure_ready", new=AsyncMock(return_value=False)):
@@ -365,6 +371,9 @@ async def test_search_and_write_helpers(tmp_path):
         )
         write.assert_not_awaited()
         assert manager._project == "acme-api"
+        await manager.end_run(status="stopped")
+        assert write.await_args.args[0] == "Pipeline finished"
+        assert write.await_args.kwargs["run_status"] == "stopped"
 
 
 @pytest.mark.anyio
@@ -433,6 +442,96 @@ def test_safe_member_path_rejects_absolute_and_unknown_names():
     assert install_ai_memory._safe_member_path("/ai-memory") is None
     assert install_ai_memory._safe_member_path("notes/README") is None
     assert install_ai_memory._safe_member_path("bin/ai-memory").name == "ai-memory"
+
+
+@pytest.mark.anyio
+async def test_review_page_does_not_replace_pipeline_snapshot(tmp_path):
+    manager = _manager(tmp_path)
+    bodies: dict[str, str] = {}
+
+    async def fake_cli(args, **kwargs):
+        if args[:1] == ["write-page"]:
+            path = args[args.index("--path") + 1]
+            bodies[path] = args[args.index("--body") + 1]
+            return 0, "ok", ""
+        return 0, "", ""
+
+    with patch.object(manager, "ensure_ready", new=AsyncMock(return_value=True)), \
+         patch.object(manager, "_run_cli", side_effect=fake_cli):
+        await manager.begin_run(
+            cwd=str(tmp_path),
+            project="owner/repo",
+            demand="add login",
+            git_branch="feature/login",
+        )
+        await manager.after_step(step_name="RED", status="success", git_changes="• a.py", stdout="red")
+        await manager.end_run(status="success")
+        pipeline_page = bodies[PROGRESS_PAGE_PATH]
+
+        await manager.begin_run(
+            cwd=str(tmp_path),
+            project="owner/repo",
+            demand="review",
+            git_branch="pr-4",
+            page_path=REVIEW_PAGE_PATH,
+        )
+        await manager.after_step(step_name="PR Reviewer", status="success", git_changes="", stdout="no issues")
+        await manager.end_run(status="success")
+
+    assert "• a.py" in pipeline_page
+    assert REVIEW_PAGE_PATH in bodies
+    assert "no issues" in bodies[REVIEW_PAGE_PATH]
+    assert bodies[REVIEW_PAGE_PATH] != pipeline_page
+
+
+def test_stop_serve_and_cache_reset(tmp_path, monkeypatch):
+    import signal
+
+    import agents.memory_manager as memory_manager
+
+    manager = _manager(tmp_path)
+    manager.stop_serve()
+
+    finished = MagicMock()
+    finished.returncode = 0
+    finished.pid = 10
+    manager._serve_proc = finished
+    manager._ready = True
+    manager.stop_serve()
+    assert manager._serve_proc is None
+    assert manager._ready is False
+
+    live = MagicMock()
+    live.returncode = None
+    live.pid = 4321
+    manager._serve_proc = live
+    manager._ready = True
+    with patch("agents.memory.cli.os.kill") as kill:
+        manager.stop_serve()
+        kill.assert_called_once_with(4321, signal.SIGTERM)
+
+    ignored = MagicMock()
+    ignored.returncode = None
+    ignored.pid = "not-a-pid"
+    manager._serve_proc = ignored
+    manager.stop_serve()
+    assert manager._serve_proc is None
+
+    live.returncode = None
+    live.pid = 99
+    manager._serve_proc = live
+    with patch("agents.memory.cli.os.kill", side_effect=ProcessLookupError):
+        manager.stop_serve()
+
+    monkeypatch.setenv("AI_MEMORY_ENABLED", "true")
+    with patch("agents.memory.settings.shutil.which", return_value="/bin/ai-memory"):
+        cached = get_memory_manager()
+        cached.stop_serve = MagicMock()
+        memory_manager._stop_cached_serve()
+        cached.stop_serve.assert_called_once()
+        reset_memory_manager_cache()
+        assert cached.stop_serve.call_count == 2
+        memory_manager._stop_cached_serve()
 
 
 def test_ai_memory_binary_fallback(monkeypatch):

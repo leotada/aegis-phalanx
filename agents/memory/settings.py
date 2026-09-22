@@ -14,6 +14,7 @@ DEFAULT_WORKSPACE = "aegis-phalanx"
 DEFAULT_CONTEXT_CHARS = 4000
 DEFAULT_CLI_TIMEOUT = 20.0
 PROGRESS_PAGE_PATH = "notes/pipeline-progress.md"
+REVIEW_PAGE_PATH = "notes/pr-review-progress.md"
 SEARCH_HIT_LIMIT = 8
 
 MEMORY_PREAMBLE = (
