@@ -1,1 +1,1 @@
-"""Orchestrator package: Telegram-independent pipeline, git, and process helpers."""
+"""Object services for the pipeline, review, git workspace, and Telegram controller."""
